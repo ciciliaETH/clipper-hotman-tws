@@ -44,22 +44,48 @@ export default function DashboardTotalPage() {
       const effEnd = mode==='accrual' ? todayStr : end;
 
       let json:any = null;
-      // Always use /api/groups/series so semua group tampil
-      const url = new URL('/api/groups/series', window.location.origin);
       if (mode === 'accrual') {
-        url.searchParams.set('mode', 'accrual');
-        url.searchParams.set('days', String(accrualWindow));
-        url.searchParams.set('snapshots_only', '1');
-        url.searchParams.set('cutoff', accrualCutoff);
+        // Parity with /groups: gunakan API accrual per-campaign, lalu gabungkan
+        const campaignsRes = await fetch('/api/campaigns', { cache: 'no-store' });
+        const campaigns = await campaignsRes.json();
+        const groups:any[] = [];
+        const sumByDate = (arrs: any[][]) => {
+          const map = new Map<string, {date:string;views:number;likes:number;comments:number;shares:number;saves:number}>();
+          for (const a of arrs) {
+            for (const s of a||[]) {
+              const k = String(s.date);
+              const cur = map.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 };
+              cur.views += Number(s.views)||0; cur.likes += Number(s.likes)||0; cur.comments += Number(s.comments)||0; cur.shares += Number(s.shares)||0; cur.saves += Number(s.saves)||0;
+              map.set(k, cur);
+            }
+          }
+          return Array.from(map.values()).sort((a,b)=> a.date.localeCompare(b.date));
+        };
+        const resps = await Promise.all((campaigns||[]).map((c:any)=> fetch(`/api/campaigns/${encodeURIComponent(c.id)}/accrual?days=${accrualWindow}&snapshots_only=1&cutoff=${encodeURIComponent(accrualCutoff)}`, { cache: 'no-store' })));        
+        const accs = await Promise.all(resps.map(r=> r.ok ? r.json() : Promise.resolve(null)));
+        const ttAll: any[][] = []; const igAll: any[][] = []; const totalAll: any[][] = [];
+        accs.forEach((acc:any, idx:number)=>{
+          if (!acc) return;
+          const gid = campaigns[idx]?.id;
+          const gname = campaigns[idx]?.name || gid;
+          groups.push({ id: gid, name: gname, series: acc?.series_total||[], series_tiktok: acc?.series_tiktok||[], series_instagram: acc?.series_instagram||[] });
+          ttAll.push(acc?.series_tiktok||[]); igAll.push(acc?.series_instagram||[]); totalAll.push(acc?.series_total||[]);
+        });
+        const total = sumByDate(totalAll);
+        const total_tiktok = sumByDate(ttAll);
+        const total_instagram = sumByDate(igAll);
+        json = { interval:'daily', start: effStart, end: effEnd, groups, total, total_tiktok, total_instagram };
       } else {
+        // Post date: gunakan endpoint groups/series bawaan
+        const url = new URL('/api/groups/series', window.location.origin);
         url.searchParams.set('start', effStart);
         url.searchParams.set('end', effEnd);
         url.searchParams.set('interval', interval);
         url.searchParams.set('mode', mode);
         url.searchParams.set('cutoff', accrualCutoff);
+        const res = await fetch(url.toString(), { cache: 'no-store' });
+        json = await res.json();
       }
-      const res = await fetch(url.toString(), { cache: 'no-store' });
-      json = await res.json();
       // Ensure platform arrays exist (older API responses might miss them)
       try {
         if (Array.isArray(json?.groups)) {
