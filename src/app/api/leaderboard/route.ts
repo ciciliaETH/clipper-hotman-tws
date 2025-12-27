@@ -30,6 +30,83 @@ export async function GET(req: Request) {
     const endParam = url.searchParams.get('end');
     const supabaseAdmin = adminClient();
 
+    // Global accrual across ALL employees for 7/28 days
+    if (mode === 'accrual' && (scope === 'employees' || scope === 'all')) {
+      const daysParam = Number(url.searchParams.get('days') || '7');
+      const windowDays = ([7,28] as number[]).includes(daysParam) ? daysParam : 7;
+      const endISO = new Date().toISOString().slice(0,10);
+      const startISO = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(windowDays-1)); return d.toISOString().slice(0,10) })();
+
+      const { data: empUsers } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name, username, tiktok_username, instagram_username')
+        .eq('role','karyawan');
+      const empIds: string[] = (empUsers||[]).map((u:any)=> String((u as any).id));
+      if (!empIds.length) return NextResponse.json({ top, start: startISO, end: endISO, data: [], scope: 'employees', days: windowDays });
+
+      // Pull history with baseline (prev day)
+      const prev = new Date(startISO+'T00:00:00Z'); prev.setUTCDate(prev.getUTCDate()-1);
+      const prevISO = prev.toISOString().slice(0,10);
+      const { data: hist } = await supabaseAdmin
+        .from('social_metrics_history')
+        .select('user_id, platform, views, likes, comments, shares, saves, captured_at')
+        .in('user_id', empIds)
+        .gte('captured_at', prevISO+'T00:00:00Z')
+        .lte('captured_at', endISO+'T23:59:59Z')
+        .order('user_id', { ascending: true })
+        .order('platform', { ascending: true })
+        .order('captured_at', { ascending: true });
+
+      const byUserPlat = new Map<string, any[]>();
+      for (const r of hist||[]) {
+        const uid = String((r as any).user_id); const plat = String((r as any).platform||'');
+        const key = `${uid}::${plat}`; const arr = byUserPlat.get(key) || []; arr.push(r); byUserPlat.set(key, arr);
+      }
+      const totalsByUser = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
+      for (const [, arr] of byUserPlat.entries()) {
+        let prevRow:any = null; const uid = String((arr?.[0] as any)?.user_id);
+        for (const r of arr) {
+          if (!prevRow) {
+            const d0 = String((r as any).captured_at).slice(0,10);
+            if (d0 >= startISO && d0 <= endISO) {
+              const cur0 = totalsByUser.get(uid) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+              cur0.views += Math.max(0, Number((r as any).views||0));
+              cur0.likes += Math.max(0, Number((r as any).likes||0));
+              cur0.comments += Math.max(0, Number((r as any).comments||0));
+              cur0.shares += Math.max(0, Number((r as any).shares||0));
+              cur0.saves += Math.max(0, Number((r as any).saves||0));
+              totalsByUser.set(uid, cur0);
+            }
+            prevRow = r; continue;
+          }
+          const date = String((r as any).captured_at).slice(0,10);
+          if (date >= startISO && date <= endISO) {
+            const cur = totalsByUser.get(uid) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+            cur.views += Math.max(0, Number((r as any).views||0) - Number((prevRow as any).views||0));
+            cur.likes += Math.max(0, Number((r as any).likes||0) - Number((prevRow as any).likes||0));
+            cur.comments += Math.max(0, Number((r as any).comments||0) - Number((prevRow as any).comments||0));
+            cur.shares += Math.max(0, Number((r as any).shares||0) - Number((prevRow as any).shares||0));
+            cur.saves += Math.max(0, Number((r as any).saves||0) - Number((prevRow as any).saves||0));
+            totalsByUser.set(uid, cur);
+          }
+          prevRow = r;
+        }
+      }
+
+      const nameMap = new Map<string,string>();
+      for (const u of empUsers||[]) nameMap.set(String((u as any).id), String((u as any).full_name || (u as any).username || (u as any).tiktok_username || (u as any).instagram_username || (u as any).id));
+
+      const rows = Array.from(totalsByUser.entries()).map(([uid, v])=> ({
+        username: nameMap.get(uid) || uid,
+        views: v.views, likes: v.likes, comments: v.comments, shares: v.shares, saves: v.saves, posts: 0,
+        total: v.views + v.likes + v.comments + v.shares + v.saves,
+      }));
+      const sorted = rows.sort((a,b)=> b.total - a.total);
+      const limited = top ? sorted.slice(0, top) : sorted;
+      const data = limited.map((x,i)=> ({ rank: i+1, ...x }));
+      return NextResponse.json({ top, start: startISO, end: endISO, data, scope:'employees', days: windowDays });
+    }
+
     // If monthly + scope=employees → bypass campaign logic and aggregate across all employees
     if (scope === 'employees') {
       const supa = supabaseAdmin;

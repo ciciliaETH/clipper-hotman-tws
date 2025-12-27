@@ -38,8 +38,9 @@ export default function LeaderboardPage() {
     setLoading(true); setError(null);
     try {
       const url = new URL('/api/leaderboard', window.location.origin);
-      // Selaraskan dengan /group: pakai accrual campaign aktif
+      // Global leaderboard semua karyawan (bukan hanya 1 group)
       url.searchParams.set('mode','accrual');
+      url.searchParams.set('scope','employees');
       url.searchParams.set('days', iv==='days7' ? '7' : '28');
       const res = await fetch(url.toString());
       const json = await res.json();
