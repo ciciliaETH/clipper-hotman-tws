@@ -13,7 +13,7 @@ jobs:
       - name: Refresh TikTok Data
         run: |
           echo "Triggering TikTok refresh..."
-          curl -v "${{ secrets.APP_URL }}/api/cron/tiktok-refresh?limit=100&concurrency=3" || echo "TikTok refresh failed"
+          curl -v "${{ secrets.APP_URL }}/api/cron/tiktok-refresh?limit=100&concurrency=3&secret=${{ secrets.CRON_SECRET }}" || echo "TikTok refresh failed"
         continue-on-error: true
 
       - name: Wait before Instagram refresh
@@ -22,5 +22,5 @@ jobs:
       - name: Refresh Instagram Data
         run: |
           echo "Triggering Instagram refresh..."
-          curl -v "${{ secrets.APP_URL }}/api/cron/instagram-refresh?limit=100&concurrency=3" || echo "Instagram refresh failed"
+          curl -v "${{ secrets.APP_URL }}/api/cron/instagram-refresh?limit=100&concurrency=3&secret=${{ secrets.CRON_SECRET }}" || echo "Instagram refresh failed"
         continue-on-error: true

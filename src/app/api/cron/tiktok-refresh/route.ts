@@ -14,7 +14,15 @@ function adminClient() {
 
 export async function GET(req: Request) {
   try {
+    // Verify cron secret for security
     const { searchParams } = new URL(req.url)
+    const cronSecret = searchParams.get('secret') || req.headers.get('x-cron-secret')
+    const expectedSecret = process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY
+    
+    if (!cronSecret || cronSecret !== expectedSecret) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    
     const url = new URL(req.url)
     const baseUrl = `${url.protocol}//${url.host}`
 

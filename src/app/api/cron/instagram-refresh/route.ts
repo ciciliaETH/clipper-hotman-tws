@@ -35,12 +35,17 @@ async function asyncPool<T, R>(items: T[], limit: number, worker: (t: T, idx: nu
 
 export async function GET(req: NextRequest) {
   try {
-    // Simple bearer check
+    // Verify cron secret for security (support both header and query param)
     const authHeader = req.headers.get('authorization')
     const token = authHeader?.replace(/^Bearer\s+/i, '')
+    const secretParam = req.nextUrl.searchParams.get('secret')
     const cronSecret = process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY
     const isVercelCron = Boolean(req.headers.get('x-vercel-cron'))
-    if (!isVercelCron && (!token || token !== cronSecret)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    
+    // Allow if: Vercel Cron header, valid token, or valid secret param
+    if (!isVercelCron && token !== cronSecret && secretParam !== cronSecret) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
 
     const search = req.nextUrl.searchParams
     const limit = parseInt(search.get('limit') || '200')
