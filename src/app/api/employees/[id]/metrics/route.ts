@@ -534,6 +534,42 @@ export async function GET(req: Request, context: any) {
     }
     seriesTikTok = alignedTT; seriesInstagram = alignedIG; series = merged;
 
+    // Load historical metrics if available
+    let historical: any[] = [];
+    try {
+      const { data: histData } = await supabase
+        .from('employee_historical_metrics')
+        .select('*')
+        .eq('employee_id', id)
+        .order('start_date', { ascending: true });
+      
+      if (histData && histData.length > 0) {
+        // Filter by campaign if specified
+        let filtered = histData;
+        if (campaignId) {
+          filtered = histData.filter((h: any) => 
+            h.campaign_id === campaignId || h.campaign_id === null
+          );
+        }
+        
+        // Transform to series format with period label
+        historical = filtered.map((h: any) => ({
+          start_date: h.start_date,
+          end_date: h.end_date,
+          period_label: `${new Date(h.start_date).toLocaleDateString('id-ID')} - ${new Date(h.end_date).toLocaleDateString('id-ID')}`,
+          platform: h.platform,
+          views: Number(h.views) || 0,
+          likes: Number(h.likes) || 0,
+          comments: Number(h.comments) || 0,
+          shares: Number(h.shares) || 0,
+          saves: Number(h.saves) || 0,
+          is_historical: true
+        }));
+      }
+    } catch (e) {
+      console.error('Error loading historical metrics:', e);
+    }
+
     const totals = {
       views: (totalsTikTok.views||0)+(totalsInstagram.views||0),
       likes: (totalsTikTok.likes||0)+(totalsInstagram.likes||0),
@@ -542,7 +578,18 @@ export async function GET(req: Request, context: any) {
       saves: (totalsTikTok.saves||0)+(totalsInstagram.saves||0),
       posts: (totalsTikTok.posts||0)+(totalsInstagram.posts||0),
     };
-    return NextResponse.json({ series, series_tiktok: seriesTikTok, series_instagram: seriesInstagram, totals, totals_tiktok: totalsTikTok, totals_instagram: totalsInstagram, interval, resolved_usernames: { tiktok: normUsernames, instagram: normIG }, window: { start, end } });
+    return NextResponse.json({ 
+      series, 
+      series_tiktok: seriesTikTok, 
+      series_instagram: seriesInstagram, 
+      historical,
+      totals, 
+      totals_tiktok: totalsTikTok, 
+      totals_instagram: totalsInstagram, 
+      interval, 
+      resolved_usernames: { tiktok: normUsernames, instagram: normIG }, 
+      window: { start, end } 
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
