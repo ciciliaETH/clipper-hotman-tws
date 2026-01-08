@@ -25,15 +25,15 @@ export default function DashboardTotalPage() {
   const [end, setEnd] = useState<string>(()=> new Date().toISOString().slice(0,10));
   const [mode, setMode] = useState<'postdate'|'accrual'>('accrual');
   const [accrualWindow, setAccrualWindow] = useState<7|28|60>(7);
-  const [useCustomAccrualDates, setUseCustomAccrualDates] = useState<boolean>(false);
+  const [useCustomAccrualDates, setUseCustomAccrualDates] = useState<boolean>(true); // Changed to true
   const [accrualCustomStart, setAccrualCustomStart] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 7);
-    return d.toISOString().slice(0, 10);
+    // Default to start of August 2025 to show historical data
+    return '2025-08-02';
   });
   const [accrualCustomEnd, setAccrualCustomEnd] = useState<string>(() => new Date().toISOString().slice(0, 10));
-  const [weeklyView, setWeeklyView] = useState<boolean>(false);
+  const [weeklyView, setWeeklyView] = useState<boolean>(true); // Changed to true
   const [platformFilter, setPlatformFilter] = useState<'all'|'tiktok'|'instagram'>('all');
-  const [showHistorical, setShowHistorical] = useState<boolean>(false);
+  const [showHistorical, setShowHistorical] = useState<boolean>(true); // Changed to true
   const [historicalData, setHistoricalData] = useState<any[]>([]);
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -738,6 +738,68 @@ export default function DashboardTotalPage() {
   // Crosshair + floating label, like Groups
   const chartRef = useRef<any>(null);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  
+  // Calculate grand totals including historical data
+  const grandTotals = useMemo(() => {
+    if (!data) return { views: 0, likes: 0, comments: 0 };
+    
+    // Start with real-time totals
+    let totals = {
+      views: Number(data.totals?.views || 0),
+      likes: Number(data.totals?.likes || 0),
+      comments: Number(data.totals?.comments || 0)
+    };
+    
+    console.log('[GRAND TOTALS] Real-time totals:', totals);
+    
+    // Add historical data if enabled and available
+    if (showHistorical && historicalData.length > 0) {
+      console.log('[GRAND TOTALS] Adding historical data...');
+      console.log('[GRAND TOTALS] Historical records count:', historicalData.length);
+      
+      let historicalSum = { views: 0, likes: 0, comments: 0 };
+      
+      historicalData.forEach((h: any, idx: number) => {
+        const views = Number(h.views) || 0;
+        const likes = Number(h.likes) || 0;
+        const comments = Number(h.comments) || 0;
+        
+        historicalSum.views += views;
+        historicalSum.likes += likes;
+        historicalSum.comments += comments;
+        
+        if (idx < 3) {
+          console.log(`[GRAND TOTALS] Historical record ${idx}:`, {
+            period: `${h.start_date} to ${h.end_date}`,
+            platform: h.platform,
+            views, likes, comments
+          });
+        }
+      });
+      
+      console.log('[GRAND TOTALS] Historical sum:', historicalSum);
+      
+      totals.views += historicalSum.views;
+      totals.likes += historicalSum.likes;
+      totals.comments += historicalSum.comments;
+      
+      console.log('[GRAND TOTALS] Final totals (real-time + historical):', totals);
+      console.log('[GRAND TOTALS] Breakdown:', {
+        realTime: {
+          views: Number(data.totals?.views || 0),
+          likes: Number(data.totals?.likes || 0),
+          comments: Number(data.totals?.comments || 0)
+        },
+        historical: historicalSum,
+        combined: totals
+      });
+    } else {
+      console.log('[GRAND TOTALS] Historical data not included (showHistorical:', showHistorical, ', count:', historicalData.length, ')');
+    }
+    
+    return totals;
+  }, [data, showHistorical, historicalData]);
+  
   const crosshairPlugin = useMemo(()=>({
     id: 'crosshairPlugin',
     afterDraw(chart:any){
@@ -762,64 +824,38 @@ export default function DashboardTotalPage() {
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-white/70">
           {data && (
             <>
-              <span>Views: <strong className="text-white">{Number(data.totals?.views||0).toLocaleString('id-ID')}</strong></span>
-              <span>Likes: <strong className="text-white">{Number(data.totals?.likes||0).toLocaleString('id-ID')}</strong></span>
-              <span>Comments: <strong className="text-white">{Number(data.totals?.comments||0).toLocaleString('id-ID')}</strong></span>
+              <span>Views: <strong className="text-white">{Number(grandTotals.views).toLocaleString('id-ID')}</strong></span>
+              <span>Likes: <strong className="text-white">{Number(grandTotals.likes).toLocaleString('id-ID')}</strong></span>
+              <span>Comments: <strong className="text-white">{Number(grandTotals.comments).toLocaleString('id-ID')}</strong></span>
               {lastUpdatedHuman && (
                 <span className="ml-auto text-white/60">Terakhir diperbarui: <strong className="text-white/80">{lastUpdatedHuman}</strong></span>
               )}
             </>
           )}
         </div>
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex justify-between items-center">
           {mode === 'postdate' ? (
-            <div className="flex items-center gap-2 mr-2">
+            <div className="flex items-center gap-2">
               <input type="date" value={start} onChange={(e)=>setStart(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
               <span className="text-white/50">s/d</span>
               <input type="date" value={end} onChange={(e)=>setEnd(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
             </div>
           ) : (
-            <div className="flex flex-col gap-2 items-end">
-              <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={useCustomAccrualDates}
-                  onChange={(e) => setUseCustomAccrualDates(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 text-blue-600"
-                />
-                <span>Custom Date</span>
-              </label>
-              {useCustomAccrualDates && (
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <input type="date" value={accrualCustomStart} onChange={(e)=>setAccrualCustomStart(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
-                    <span className="text-white/50">→</span>
-                    <input type="date" value={accrualCustomEnd} onChange={(e)=>setAccrualCustomEnd(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
-                  </div>
-                  <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={weeklyView}
-                      onChange={(e) => setWeeklyView(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 text-blue-600"
-                    />
-                    <span>Tampilan Mingguan</span>
-                  </label>
-                  {weeklyView && (
-                    <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer ml-4">
-                      <input
-                        type="checkbox"
-                        checked={showHistorical}
-                        onChange={(e) => setShowHistorical(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 text-blue-600"
-                      />
-                      <span>Tampilkan Data Historis</span>
-                    </label>
-                  )}
-                </div>
-              )}
+            <div className="flex items-center gap-2">
+              <input type="date" value={accrualCustomStart} onChange={(e)=>setAccrualCustomStart(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
+              <span className="text-white/50">→</span>
+              <input type="date" value={accrualCustomEnd} onChange={(e)=>setAccrualCustomEnd(e.target.value)} className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 text-sm"/>
             </div>
           )}
+          <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={weeklyView}
+              onChange={(e) => setWeeklyView(e.target.checked)}
+              className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 text-blue-600"
+            />
+            <span>Tampilan Mingguan</span>
+          </label>
         </div>
       </div>
 
