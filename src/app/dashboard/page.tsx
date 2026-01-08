@@ -189,30 +189,40 @@ export default function DashboardTotalPage() {
   useEffect(() => {
     const loadHistorical = async () => {
       if (!showHistorical) {
+        console.log('[HISTORICAL] showHistorical is false, skipping load');
         setHistoricalData([]);
         return;
       }
+      
+      console.log('[HISTORICAL] Loading data... platformFilter:', platformFilter);
       
       try {
         // Fetch employee historical metrics (no date filter to show all historical data)
         const platformParam = platformFilter === 'all' ? '' : platformFilter;
         
-        const res = await fetch(`/api/admin/employee-historical?platform=${platformParam}`);
+        const url = `/api/admin/employee-historical?platform=${platformParam}`;
+        console.log('[HISTORICAL] Fetching from:', url);
+        
+        const res = await fetch(url);
         const json = await res.json();
         
+        console.log('[HISTORICAL] Response status:', res.status);
+        console.log('[HISTORICAL] Response data:', json);
+        
         if (res.ok && json.data) {
-          console.log('Historical employee data loaded:', json.data.length);
+          console.log('[HISTORICAL] Data loaded successfully, count:', json.data.length);
+          console.log('[HISTORICAL] Sample entry:', json.data[0]);
           // Sort by start_date to show chronologically
           const sorted = json.data.sort((a: any, b: any) => 
             new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
           );
           setHistoricalData(sorted);
         } else {
-          console.error('Failed to load historical data:', json.error);
+          console.error('[HISTORICAL] Failed to load:', json.error);
           setHistoricalData([]);
         }
       } catch (error) {
-        console.error('Failed to load historical data:', error);
+        console.error('[HISTORICAL] Exception:', error);
         setHistoricalData([]);
       }
     };
@@ -252,52 +262,107 @@ export default function DashboardTotalPage() {
     
     // Helper: merge historical data into series
     const mergeHistoricalData = (currentData: any) => {
-      if (!showHistorical || historicalData.length === 0) return currentData;
+      console.log('[MERGE] Starting merge, showHistorical:', showHistorical);
+      console.log('[MERGE] historicalData.length:', historicalData.length);
+      console.log('[MERGE] currentData keys:', Object.keys(currentData || {}));
       
-      console.log('Merging historical data:', historicalData.length, 'entries');
+      if (!showHistorical || historicalData.length === 0) {
+        console.log('[MERGE] Skipping merge - no historical data to add');
+        return currentData;
+      }
       
-      // Group employee historical by date range and aggregate metrics
-      const historicalGrouped = new Map();
+      console.log('[MERGE] Processing', historicalData.length, 'historical entries');
+      console.log('[MERGE] Raw historical data:', historicalData);
+      
+      // Group by date range only (not by platform) to create proper periods
+      const periodMap = new Map();
       
       historicalData.forEach((record: any) => {
-        const key = `${record.start_date}_${record.end_date}_${record.platform}`;
+        const periodKey = `${record.start_date}_${record.end_date}`;
         
-        if (!historicalGrouped.has(key)) {
-          historicalGrouped.set(key, {
+        if (!periodMap.has(periodKey)) {
+          periodMap.set(periodKey, {
             start_date: record.start_date,
             end_date: record.end_date,
-            platform: record.platform,
-            views: 0,
-            likes: 0,
-            comments: 0,
-            shares: 0,
-            saves: 0
+            all: { views: 0, likes: 0, comments: 0, shares: 0, saves: 0 },
+            tiktok: { views: 0, likes: 0, comments: 0, shares: 0, saves: 0 },
+            instagram: { views: 0, likes: 0, comments: 0, shares: 0, saves: 0 }
           });
         }
         
-        const group = historicalGrouped.get(key);
-        group.views += Number(record.views) || 0;
-        group.likes += Number(record.likes) || 0;
-        group.comments += Number(record.comments) || 0;
-        group.shares += Number(record.shares) || 0;
-        group.saves += Number(record.saves) || 0;
+        const period = periodMap.get(periodKey);
+        
+        // Add to appropriate platform bucket
+        if (record.platform === 'all') {
+          period.all.views += Number(record.views) || 0;
+          period.all.likes += Number(record.likes) || 0;
+          period.all.comments += Number(record.comments) || 0;
+          period.all.shares += Number(record.shares) || 0;
+          period.all.saves += Number(record.saves) || 0;
+        } else if (record.platform === 'tiktok') {
+          period.tiktok.views += Number(record.views) || 0;
+          period.tiktok.likes += Number(record.likes) || 0;
+          period.tiktok.comments += Number(record.comments) || 0;
+          period.tiktok.shares += Number(record.shares) || 0;
+          period.tiktok.saves += Number(record.saves) || 0;
+        } else if (record.platform === 'instagram') {
+          period.instagram.views += Number(record.views) || 0;
+          period.instagram.likes += Number(record.likes) || 0;
+          period.instagram.comments += Number(record.comments) || 0;
+          period.instagram.shares += Number(record.shares) || 0;
+          period.instagram.saves += Number(record.saves) || 0;
+        }
       });
       
       // Convert to series format
-      const historicalSeries: any[] = Array.from(historicalGrouped.values()).map(item => ({
-        date: item.start_date, // Use start_date as the identifier
-        week_start: item.start_date,
-        week_end: item.end_date,
-        views: item.views,
-        likes: item.likes,
-        comments: item.comments,
-        shares: item.shares,
-        saves: item.saves,
-        is_historical: true,
-        platform: item.platform
-      }));
+      const historicalSeries: any[] = [];
       
-      console.log('Historical series created:', historicalSeries.length);
+      periodMap.forEach((period) => {
+        // If 'all' platform exists, use it as total, otherwise sum tiktok + instagram
+        const total = period.all.views > 0 ? period.all : {
+          views: period.tiktok.views + period.instagram.views,
+          likes: period.tiktok.likes + period.instagram.likes,
+          comments: period.tiktok.comments + period.instagram.comments,
+          shares: period.tiktok.shares + period.instagram.shares,
+          saves: period.tiktok.saves + period.instagram.saves
+        };
+        
+        console.log('[MERGE] Period aggregation:', {
+          dates: `${period.start_date} to ${period.end_date}`,
+          has_all_platform: period.all.views > 0,
+          total_views: total.views,
+          tiktok_views: period.tiktok.views,
+          instagram_views: period.instagram.views,
+          sum_check: period.tiktok.views + period.instagram.views
+        });
+        
+        historicalSeries.push({
+          date: period.start_date,
+          week_start: period.start_date,
+          week_end: period.end_date,
+          views: total.views,
+          likes: total.likes,
+          comments: total.comments,
+          shares: total.shares,
+          saves: total.saves,
+          is_historical: true,
+          platform: 'total',
+          // Include platform breakdowns as objects (not just views)
+          tiktok: {
+            views: period.tiktok.views,
+            likes: period.tiktok.likes,
+            comments: period.tiktok.comments
+          },
+          instagram: {
+            views: period.instagram.views,
+            likes: period.instagram.likes,
+            comments: period.instagram.comments
+          }
+        });
+      });
+      
+      console.log('[MERGE] Created', historicalSeries.length, 'historical period entries');
+      console.log('[MERGE] Sample historical series:', historicalSeries[0]);
       
       return {
         ...currentData,
@@ -340,226 +405,269 @@ export default function DashboardTotalPage() {
     
     if (weeklyView && useCustomAccrualDates && mode === 'accrual') {
       console.log('[WEEKLY VIEW] Enabled, processing weekly data...');
-      // Weekly aggregation
-      const startDate = accrualCustomStart;
-      const weeklyTotal = groupByWeek(mergedData.total || [], startDate);
       
-      console.log('[WEEKLY VIEW] weeklyTotal length:', weeklyTotal.length);
-      console.log('[WEEKLY VIEW] showHistorical:', showHistorical, 'historicalData:', mergedData.historical?.length || 0);
+      // Combine historical and real-time into one continuous sorted timeline
+      let allPeriods: any[] = [];
       
-      // Prepend historical data if enabled
-      let allWeeklyData = weeklyTotal;
+      // Add historical periods if enabled
       if (showHistorical && mergedData.historical) {
-        const historicalWeekly = mergedData.historical.map((h: any, idx: number) => {
-          const startDate = new Date(h.week_start);
-          const endDate = new Date(h.week_end);
-          return {
-            weekNum: -(mergedData.historical.length - idx), // Negative week nums for historical
-            week_label: `${format(startDate, 'd MMM', { locale: localeID })}-${format(endDate, 'd MMM', { locale: localeID })}`,
-            views: h.views,
-            likes: h.likes,
-            comments: h.comments,
-            shares: h.shares,
-            saves: h.saves,
+        console.log('[WEEKLY VIEW] Adding', mergedData.historical.length, 'historical periods');
+        mergedData.historical.forEach((h: any) => {
+          console.log('[WEEKLY VIEW] Historical entry raw:', JSON.stringify(h));
+          
+          // Use week_start/week_end (from mergeHistoricalData)
+          const startDate = new Date(h.week_start || h.start_date);
+          const endDate = new Date(h.week_end || h.end_date);
+          
+          // Validate dates
+          if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            console.warn('[WEEKLY VIEW] Invalid dates in historical entry:', h);
+            return; // Skip invalid entries
+          }
+          
+          // Extract platform data correctly
+          const tiktokViews = (h.tiktok && typeof h.tiktok === 'object') ? h.tiktok.views : 0;
+          const tiktokLikes = (h.tiktok && typeof h.tiktok === 'object') ? h.tiktok.likes : 0;
+          const tiktokComments = (h.tiktok && typeof h.tiktok === 'object') ? h.tiktok.comments : 0;
+          
+          const instagramViews = (h.instagram && typeof h.instagram === 'object') ? h.instagram.views : 0;
+          const instagramLikes = (h.instagram && typeof h.instagram === 'object') ? h.instagram.likes : 0;
+          const instagramComments = (h.instagram && typeof h.instagram === 'object') ? h.instagram.comments : 0;
+          
+          const totalViews = Number(h.views) || 0;
+          const totalLikes = Number(h.likes) || 0;
+          const totalComments = Number(h.comments) || 0;
+          
+          console.log('[WEEKLY VIEW] Parsed values:', {
+            period: `${startDate.toISOString().slice(0,10)} to ${endDate.toISOString().slice(0,10)}`,
+            total: { views: totalViews, likes: totalLikes, comments: totalComments },
+            tiktok: { views: tiktokViews, likes: tiktokLikes, comments: tiktokComments },
+            instagram: { views: instagramViews, likes: instagramLikes, comments: instagramComments }
+          });
+          
+          allPeriods.push({
             startDate: startDate,
             endDate: endDate,
-            is_historical: true
-          };
+            views: totalViews,
+            likes: totalLikes,
+            comments: totalComments,
+            tiktok: tiktokViews,
+            tiktok_likes: tiktokLikes,
+            tiktok_comments: tiktokComments,
+            instagram: instagramViews,
+            instagram_likes: instagramLikes,
+            instagram_comments: instagramComments,
+            is_historical: true,
+            groups: [] // No groups for historical data
+          });
         });
-        
-        console.log('[WEEKLY VIEW] Historical weekly entries:', historicalWeekly.length);
-        allWeeklyData = [...historicalWeekly, ...weeklyTotal];
-        console.log('[WEEKLY VIEW] Combined weekly data:', allWeeklyData.length, 'weeks');
       }
       
-      labels = allWeeklyData.map((w: any) => {
-        if (w.is_historical && w.week_label) {
-          return w.week_label; // Use stored week label for historical data
-        }
-        const start = format(w.startDate, 'd MMM', { locale: localeID });
-        const end = format(w.endDate, 'd MMM', { locale: localeID });
-        return `Week ${w.weekNum + 1} (${start}-${end})`;
+      // Add real-time weekly data
+      const startDate = accrualCustomStart;
+      const weeklyTotal = groupByWeek(mergedData.total || [], startDate);
+      console.log('[WEEKLY VIEW] Adding', weeklyTotal.length, 'real-time weeks');
+      
+      // Get platform-specific weekly data for real-time
+      const weeklyTT = (Array.isArray(data.total_tiktok) && data.total_tiktok.length) 
+        ? groupByWeek(data.total_tiktok, startDate) 
+        : [];
+      const weeklyIG = (Array.isArray(data.total_instagram) && data.total_instagram.length) 
+        ? groupByWeek(data.total_instagram, startDate) 
+        : [];
+      
+      // Get groups weekly data for real-time
+      const groupsWeekly: any[] = [];
+      if (data.groups && data.groups.length > 0) {
+        data.groups.forEach((group: any) => {
+          let groupSeries = group.series || [];
+          
+          // Use platform-specific series if platform filter is active
+          if (platformFilter === 'tiktok' && group.series_tiktok) {
+            groupSeries = group.series_tiktok;
+          } else if (platformFilter === 'instagram' && group.series_instagram) {
+            groupSeries = group.series_instagram;
+          }
+          
+          if (groupSeries.length > 0) {
+            const weeklyGroup = groupByWeek(groupSeries, startDate);
+            groupsWeekly.push({
+              name: group.name,
+              weekly: weeklyGroup
+            });
+          }
+        });
+      }
+      
+      console.log('[WEEKLY VIEW] Groups aggregated:', groupsWeekly.length);
+      
+      weeklyTotal.forEach((w: any, idx: number) => {
+        const ttData = weeklyTT[idx] || { views: 0, likes: 0, comments: 0 };
+        const igData = weeklyIG[idx] || { views: 0, likes: 0, comments: 0 };
+        
+        // Collect group data for this week
+        const groupsData: any[] = [];
+        groupsWeekly.forEach((gw: any) => {
+          if (gw.weekly[idx]) {
+            groupsData.push({
+              name: gw.name,
+              views: gw.weekly[idx].views || 0,
+              likes: gw.weekly[idx].likes || 0,
+              comments: gw.weekly[idx].comments || 0
+            });
+          }
+        });
+        
+        allPeriods.push({
+          startDate: w.startDate,
+          endDate: w.endDate,
+          views: w.views,
+          likes: w.likes,
+          comments: w.comments,
+          tiktok: ttData.views,
+          tiktok_likes: ttData.likes,
+          tiktok_comments: ttData.comments,
+          instagram: igData.views,
+          instagram_likes: igData.likes,
+          instagram_comments: igData.comments,
+          is_historical: false,
+          groups: groupsData
+        });
       });
+      
+      // Deduplicate: Remove duplicate periods (same start+end date)
+      // Historical data takes priority over real-time if same period
+      const uniquePeriods = new Map();
+      
+      allPeriods.forEach((p: any) => {
+        const key = `${p.startDate.getTime()}_${p.endDate.getTime()}`;
+        
+        // If period doesn't exist, or current is historical and existing is not, use current
+        if (!uniquePeriods.has(key) || (p.is_historical && !uniquePeriods.get(key).is_historical)) {
+          uniquePeriods.set(key, p);
+        }
+      });
+      
+      allPeriods = Array.from(uniquePeriods.values());
+      
+      // Filter out completely empty periods (all metrics are 0)
+      allPeriods = allPeriods.filter((p: any) => {
+        // Check if period is completely empty
+        const hasViews = p.views > 0 || p.likes > 0 || p.comments > 0;
+        const hasPlatformData = p.tiktok > 0 || p.instagram > 0;
+        const hasGroupData = p.groups && p.groups.some((g: any) => g.views > 0 || g.likes > 0 || g.comments > 0);
+        
+        const isEmpty = !hasViews && !hasPlatformData && !hasGroupData;
+        
+        if (isEmpty) {
+          console.log('[FILTER] Removing empty period:', {
+            dates: `${p.startDate.toISOString().slice(0,10)} to ${p.endDate.toISOString().slice(0,10)}`,
+            is_historical: p.is_historical,
+            reason: 'No data (all values are 0)'
+          });
+        }
+        
+        return !isEmpty; // Keep only periods with data
+      });
+      
+      // Sort by start date for continuous timeline
+      allPeriods.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+      
+      console.log('[WEEKLY VIEW] After filtering empty periods, remaining:', allPeriods.length);
+      
+      // Generate labels from sorted periods
+      labels = allPeriods.map((p: any) => {
+        const start = format(p.startDate, 'd MMM', { locale: localeID });
+        const end = format(p.endDate, 'd MMM', { locale: localeID });
+        return `${start}-${end}`;
+      });
+      
+      console.log('[WEEKLY VIEW] Labels:', labels);
       
       const datasets: any[] = [];
       
-      // Total line (with historical data if enabled)
-      let totalVals = allWeeklyData.map((w: any) => 
-        metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
+      // Total line values
+      let totalVals = allPeriods.map((p: any) => 
+        metric === 'likes' ? p.likes : metric === 'comments' ? p.comments : p.views
       );
       
-      // Filter by platform for real-time data only
-      if (platformFilter === 'tiktok' && Array.isArray(data.total_tiktok) && data.total_tiktok.length) {
-        const weeklyTT = groupByWeek(data.total_tiktok, startDate);
-        // Merge with historical
-        let combinedTT = weeklyTT;
-        if (showHistorical && mergedData.historical) {
-          const historicalFiltered = mergedData.historical.filter((h: any) => h.platform === 'tiktok');
-          combinedTT = [
-            ...historicalFiltered.map((h: any, idx: number) => ({
-              weekNum: -(historicalFiltered.length - idx),
-              week_label: h.date,
-              views: h.views,
-              likes: h.likes,
-              comments: h.comments,
-              shares: h.shares,
-              saves: h.saves,
-              startDate: new Date(h.week_start),
-              endDate: new Date(h.week_end),
-              is_historical: true
-            })),
-            ...weeklyTT
-          ];
-        }
-        totalVals = combinedTT.map((w: any) => 
-          metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
-        );
-      } else if (platformFilter === 'instagram' && Array.isArray(data.total_instagram) && data.total_instagram.length) {
-        const weeklyIG = groupByWeek(data.total_instagram, startDate);
-        // Merge with historical
-        let combinedIG = weeklyIG;
-        if (showHistorical && mergedData.historical) {
-          const historicalFiltered = mergedData.historical.filter((h: any) => h.platform === 'instagram');
-          combinedIG = [
-            ...historicalFiltered.map((h: any, idx: number) => ({
-              weekNum: -(historicalFiltered.length - idx),
-              week_label: h.date,
-              views: h.views,
-              likes: h.likes,
-              comments: h.comments,
-              shares: h.shares,
-              saves: h.saves,
-              startDate: new Date(h.week_start),
-              endDate: new Date(h.week_end),
-              is_historical: true
-            })),
-            ...weeklyIG
-          ];
-        }
-        totalVals = combinedIG.map((w: any) => 
-          metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
-        );
-      }
+      console.log('[WEEKLY VIEW] Total values for metric', metric, ':', totalVals);
+      console.log('[WEEKLY VIEW] First 3 periods:', allPeriods.slice(0, 3).map(p => ({
+        dates: `${p.startDate.toISOString().slice(0,10)} to ${p.endDate.toISOString().slice(0,10)}`,
+        views: p.views,
+        tiktok: p.tiktok,
+        instagram: p.instagram,
+        is_historical: p.is_historical
+      })));
       
-      // Style: historical data as dashed line
-      const isMixedData = showHistorical && mergedData.historical && mergedData.historical.length > 0;
-      
+      // Style: solid line for all (no dashed distinction)
       datasets.push({ 
         label: platformFilter === 'all' ? 'Total' : platformFilter === 'tiktok' ? 'TikTok' : 'Instagram', 
         data: totalVals, 
         borderColor: palette[0], 
         backgroundColor: palette[0] + '33', 
         fill: true, 
-        tension: 0.35,
-        borderDash: isMixedData ? [] : undefined, // Solid for mixed, or default
-        segment: isMixedData ? {
-          borderDash: (ctx: any) => {
-            // Dashed for historical points (negative week numbers)
-            return ctx.p0DataIndex < (mergedData.historical?.length || 0) ? [5, 5] : [];
-          }
-        } : undefined
+        tension: 0.35
       });
       
       // Platform breakdown (only if 'all' is selected)
       if (platformFilter === 'all') {
-        // TikTok series with historical
-        if (Array.isArray(data.total_tiktok) && data.total_tiktok.length) {
-          const weeklyTT = groupByWeek(data.total_tiktok, startDate);
-          let combinedTT = weeklyTT;
-          if (showHistorical && mergedData.historical) {
-            const historicalTT = mergedData.historical.filter((h: any) => h.platform === 'tiktok');
-            combinedTT = [
-              ...historicalTT.map((h: any, idx: number) => ({
-                weekNum: -(historicalTT.length - idx),
-                views: h.views,
-                likes: h.likes,
-                comments: h.comments,
-                is_historical: true
-              })),
-              ...weeklyTT
-            ];
-          }
-          if (combinedTT.length > 0) {
-            const ttVals = combinedTT.map((w: any) => 
-              metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
-            );
-            datasets.push({ 
-              label: 'TikTok', 
-              data: ttVals, 
-              borderColor: '#38bdf8', 
-              backgroundColor: 'rgba(56,189,248,0.15)', 
-              fill: false, 
-              tension: 0.35,
-              segment: isMixedData ? {
-                borderDash: (ctx: any) => {
-                  return ctx.p0DataIndex < (mergedData.historical?.filter((h: any) => h.platform === 'tiktok').length || 0) ? [5, 5] : [];
-                }
-              } : undefined
-            });
-          }
-        }
+        // TikTok breakdown
+        const tiktokVals = allPeriods.map((p: any) => {
+          const val = metric === 'likes' ? p.tiktok_likes : metric === 'comments' ? p.tiktok_comments : p.tiktok;
+          return val || 0;
+        });
         
-        // Instagram series with historical
-        if (Array.isArray(data.total_instagram) && data.total_instagram.length) {
-          const weeklyIG = groupByWeek(data.total_instagram, startDate);
-          let combinedIG = weeklyIG;
-          if (showHistorical && mergedData.historical) {
-            const historicalIG = mergedData.historical.filter((h: any) => h.platform === 'instagram');
-            combinedIG = [
-              ...historicalIG.map((h: any, idx: number) => ({
-                weekNum: -(historicalIG.length - idx),
-                views: h.views,
-                likes: h.likes,
-                comments: h.comments,
-                is_historical: true
-              })),
-              ...weeklyIG
-            ];
-          }
-          if (combinedIG.length > 0) {
-            const igVals = combinedIG.map((w: any) => 
-              metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
-            );
-            datasets.push({ 
-              label: 'Instagram', 
-              data: igVals, 
-              borderColor: '#f43f5e', 
-              backgroundColor: 'rgba(244,63,94,0.15)', 
-              fill: false, 
-              tension: 0.35,
-              segment: isMixedData ? {
-                borderDash: (ctx: any) => {
-                  return ctx.p0DataIndex < (mergedData.historical?.filter((h: any) => h.platform === 'instagram').length || 0) ? [5, 5] : [];
-                }
-              } : undefined
-            });
-          }
-        }
+        console.log('[WEEKLY VIEW] TikTok values:', tiktokVals.slice(0, 5));
+        
+        datasets.push({ 
+          label: 'TikTok', 
+          data: tiktokVals, 
+          borderColor: '#38bdf8', 
+          backgroundColor: 'rgba(56,189,248,0.15)', 
+          fill: false, 
+          tension: 0.35
+        });
+        
+        // Instagram breakdown
+        const instagramVals = allPeriods.map((p: any) => {
+          const val = metric === 'likes' ? p.instagram_likes : metric === 'comments' ? p.instagram_comments : p.instagram;
+          return val || 0;
+        });
+        
+        console.log('[WEEKLY VIEW] Instagram values:', instagramVals.slice(0, 5));
+        
+        datasets.push({ 
+          label: 'Instagram', 
+          data: instagramVals, 
+          borderColor: '#f43f5e', 
+          backgroundColor: 'rgba(244,63,94,0.15)', 
+          fill: false, 
+          tension: 0.35
+        });
       }
       
-      // Per group lines (filter by platform)
-      for (let i = 0; i < (data.groups || []).length; i++) {
-        const g = data.groups[i];
-        let seriesToUse = g.series || [];
-        
-        if (platformFilter === 'tiktok' && g.series_tiktok) {
-          seriesToUse = g.series_tiktok;
-        } else if (platformFilter === 'instagram' && g.series_instagram) {
-          seriesToUse = g.series_instagram;
-        }
-        
-        const weeklyGroup = groupByWeek(seriesToUse, startDate);
-        const vals = weeklyGroup.map((w: any) => 
-          metric === 'likes' ? w.likes : metric === 'comments' ? w.comments : w.views
-        );
-        const color = palette[(i + 1) % palette.length];
-        datasets.push({ 
-          label: g.name, 
-          data: vals, 
-          borderColor: color, 
-          backgroundColor: color + '33', 
-          fill: false, 
-          tension: 0.35 
+      // Per group lines - extract from allPeriods
+      if (data.groups && data.groups.length > 0) {
+        data.groups.forEach((group: any, idx: number) => {
+          const groupVals = allPeriods.map((p: any) => {
+            // Find matching group data in this period
+            const groupData = p.groups && p.groups.find((g: any) => g.name === group.name);
+            if (!groupData) return 0;
+            
+            return metric === 'likes' ? groupData.likes : metric === 'comments' ? groupData.comments : groupData.views;
+          });
+          
+          console.log(`[WEEKLY VIEW] Group ${group.name} values:`, groupVals.slice(0, 5));
+          
+          datasets.push({
+            label: group.name,
+            data: groupVals,
+            borderColor: palette[(idx + 3) % palette.length],
+            backgroundColor: 'transparent',
+            fill: false,
+            tension: 0.35
+          });
         });
       }
       
@@ -771,7 +879,23 @@ export default function DashboardTotalPage() {
           <Line ref={chartRef} data={chartData} plugins={[crosshairPlugin]} options={{
             responsive:true,
             interaction:{ mode:'index', intersect:false },
-            plugins:{ legend:{ labels:{ color:'rgba(255,255,255,0.8)'} } },
+            plugins:{ 
+              legend:{ labels:{ color:'rgba(255,255,255,0.8)'} },
+              tooltip: {
+                filter: function(tooltipItem: any) {
+                  // Hide group lines if value is 0 (historical data doesn't have groups)
+                  const label = tooltipItem.dataset.label || '';
+                  const value = tooltipItem.parsed.y;
+                  
+                  // If it's a group (Group A, B, C, D) and value is 0, hide it
+                  if (label.startsWith('Group') && value === 0) {
+                    return false;
+                  }
+                  
+                  return true;
+                }
+              }
+            },
             scales:{
               x:{
                 ticks:{ color:'rgba(255,255,255,0.6)', autoSkip: interval !== 'daily', maxRotation:0, minRotation:0 },

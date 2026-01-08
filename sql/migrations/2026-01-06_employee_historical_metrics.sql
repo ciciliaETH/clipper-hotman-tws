@@ -5,9 +5,9 @@
 BEGIN;
 
 -- Create table for storing custom period historical data manually entered by admin
+-- This stores TOTAL aggregate data (not per employee)
 CREATE TABLE IF NOT EXISTS public.employee_historical_metrics (
   id SERIAL PRIMARY KEY,
-  employee_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   platform TEXT NOT NULL CHECK (platform IN ('tiktok', 'instagram', 'all')),
@@ -21,8 +21,8 @@ CREATE TABLE IF NOT EXISTS public.employee_historical_metrics (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   -- Ensure start_date is before end_date
   CONSTRAINT valid_date_range CHECK (start_date <= end_date),
-  -- Ensure no overlapping periods for same employee+platform
-  CONSTRAINT unique_employee_period UNIQUE (employee_id, start_date, end_date, platform)
+  -- Ensure no overlapping periods for same platform
+  CONSTRAINT unique_period_platform UNIQUE (start_date, end_date, platform)
 );
 
 -- Indexes for fast lookups

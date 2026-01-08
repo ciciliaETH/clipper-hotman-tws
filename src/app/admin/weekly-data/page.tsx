@@ -3,15 +3,8 @@
 import { useEffect, useState } from 'react';
 import { format } from 'date-fns';
 
-interface Employee {
-  id: string; // UUID
-  username: string;
-  display_name?: string;
-}
-
 interface HistoricalMetric {
   id: number;
-  employee_id: string; // UUID
   start_date: string;
   end_date: string;
   platform: string;
@@ -21,17 +14,13 @@ interface HistoricalMetric {
   shares: number;
   saves: number;
   notes?: string;
-  employee?: Employee;
 }
 
 export default function WeeklyDataInput() {
-  const [employees, setEmployees] = useState<Employee[]>([]);
   const [existingData, setExistingData] = useState<HistoricalMetric[]>([]);
   const [loading, setLoading] = useState(false);
-  const [searchText, setSearchText] = useState('');
 
   const [formData, setFormData] = useState({
-    employee_id: '',
     start_date: '',
     end_date: '',
     platform: 'all',
@@ -42,26 +31,6 @@ export default function WeeklyDataInput() {
     saves: 0,
     notes: ''
   });
-
-  // Load employees
-  useEffect(() => {
-    loadEmployees();
-  }, []);
-
-  const loadEmployees = async () => {
-    try {
-      const res = await fetch('/api/employees');
-      const json = await res.json();
-      console.log('Employees loaded:', json);
-      if (json.data) {
-        setEmployees(json.data);
-      } else {
-        console.error('No employee data returned');
-      }
-    } catch (error) {
-      console.error('Error loading employees:', error);
-    }
-  };
 
   // Load existing data
   useEffect(() => {
@@ -86,8 +55,8 @@ export default function WeeklyDataInput() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!formData.employee_id || !formData.start_date || !formData.end_date) {
-      alert('Mohon lengkapi Employee, Tanggal Mulai, dan Tanggal Akhir');
+    if (!formData.start_date || !formData.end_date) {
+      alert('Mohon lengkapi Tanggal Mulai dan Tanggal Akhir');
       return;
     }
 
@@ -104,7 +73,6 @@ export default function WeeklyDataInput() {
       if (res.ok) {
         alert('Data berhasil disimpan!');
         setFormData({
-          employee_id: '',
           start_date: '',
           end_date: '',
           platform: 'all',
@@ -148,17 +116,6 @@ export default function WeeklyDataInput() {
     }
   };
 
-  // Filter employees based on search text
-  const filteredEmployees = employees.filter(emp => {
-    if (!searchText) return true;
-    const search = searchText.toLowerCase();
-    return (
-      emp.username?.toLowerCase().includes(search) ||
-      emp.display_name?.toLowerCase().includes(search) ||
-      emp.id.toLowerCase().includes(search)
-    );
-  });
-
   return (
     <div className="min-h-screen p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
@@ -169,47 +126,50 @@ export default function WeeklyDataInput() {
         {/* Form */}
         <div className="glass rounded-2xl p-6 border border-white/10 mb-6">
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Employee Selection with Search */}
+            {/* Custom Date Range */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-white/80 mb-2">
+                  Tanggal Mulai <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={formData.start_date}
+                  onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-white/80 mb-2">
+                  Tanggal Akhir <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={formData.end_date}
+                  onChange={(e) => setFormData({ ...formData, end_date: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white"
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Platform */}
             <div>
               <label className="block text-sm font-medium text-white/80 mb-2">
-                Employee <span className="text-red-400">*</span>
+                Platform <span className="text-red-400">*</span>
               </label>
-              
-              {/* Search Input */}
-              <input
-                type="text"
-                placeholder="🔍 Search employee by name or username..."
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                className="w-full px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white placeholder:text-white/30 mb-2"
-              />
-              
-              {/* Employee Select */}
               <select
-                value={formData.employee_id}
-                onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
+                value={formData.platform}
+                onChange={(e) => setFormData({ ...formData, platform: e.target.value })}
                 className="w-full px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white"
                 required
               >
-                <option value="">Pilih Employee...</option>
-                {employees.length === 0 && (
-                  <option disabled>Loading...</option>
-                )}
-                {filteredEmployees.length === 0 && searchText && (
-                  <option disabled>No employees found</option>
-                )}
-                {filteredEmployees.map(emp => (
-                  <option key={emp.id} value={emp.id}>
-                    {emp.display_name || emp.username} (@{emp.username})
-                  </option>
-                ))}
+                <option value="all">Semua Platform</option>
+                <option value="tiktok">TikTok</option>
+                <option value="instagram">Instagram</option>
               </select>
-              {employees.length === 0 && (
-                <p className="text-xs text-red-400 mt-1">No employees found. Check browser console.</p>
-              )}
-              {employees.length > 0 && (
-                <p className="text-xs text-white/50 mt-1">{employees.length} employee(s) available</p>
-              )}
             </div>
 
             {/* Custom Date Range */}
@@ -357,7 +317,6 @@ export default function WeeklyDataInput() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-white/10">
-                    <th className="text-left py-3 px-2 text-white/70 font-medium">Employee</th>
                     <th className="text-left py-3 px-2 text-white/70 font-medium">Periode</th>
                     <th className="text-left py-3 px-2 text-white/70 font-medium">Platform</th>
                     <th className="text-right py-3 px-2 text-white/70 font-medium">Views</th>
@@ -367,13 +326,8 @@ export default function WeeklyDataInput() {
                   </tr>
                 </thead>
                 <tbody>
-                  {existingData.map((item) => {
-                    const employee = employees.find(e => e.id === item.employee_id);
-                    return (
+                  {existingData.map((item) => (
                     <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
-                      <td className="py-3 px-2 text-white">
-                        {employee?.full_name || employee?.username || item.employee_id.substring(0, 8)}
-                      </td>
                       <td className="py-3 px-2 text-white/80">
                         {format(new Date(item.start_date), 'dd MMM yyyy')} - {format(new Date(item.end_date), 'dd MMM yyyy')}
                       </td>
@@ -383,7 +337,7 @@ export default function WeeklyDataInput() {
                           item.platform === 'instagram' ? 'bg-pink-500/20 text-pink-300' :
                           'bg-purple-500/20 text-purple-300'
                         }`}>
-                          {item.platform === 'all' ? 'Semua' : item.platform.toUpperCase()}
+                          {item.platform === 'all' ? 'TOTAL' : item.platform.toUpperCase()}
                         </span>
                       </td>
                       <td className="py-3 px-2 text-white/80 text-right">
@@ -404,8 +358,7 @@ export default function WeeklyDataInput() {
                         </button>
                       </td>
                     </tr>
-                    );
-                  })}
+                  ))}
                 </tbody>
               </table>
             </div>

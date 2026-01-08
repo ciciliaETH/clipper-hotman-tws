@@ -26,7 +26,6 @@ export async function GET(request: Request) {
       .from('employee_historical_metrics')
       .select(`
         id,
-        employee_id,
         start_date,
         end_date,
         platform,
@@ -41,10 +40,7 @@ export async function GET(request: Request) {
       `)
       .order('start_date', { ascending: false });
 
-    if (employeeId) {
-      query = query.eq('employee_id', employeeId);
-    }
-    if (platform && platform !== 'all') {
+    if (platform && platform !== 'all' && platform !== '') {
       query = query.eq('platform', platform);
     }
     if (startDate) {
@@ -68,12 +64,11 @@ export async function GET(request: Request) {
   }
 }
 
-// POST: Create new employee historical metric
+// POST: Create new historical metric (aggregate total data)
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const {
-      employee_id,
       start_date,
       end_date,
       platform,
@@ -86,9 +81,9 @@ export async function POST(request: Request) {
     } = body;
 
     // Validation
-    if (!employee_id || !start_date || !end_date || !platform) {
+    if (!start_date || !end_date || !platform) {
       return NextResponse.json(
-        { error: 'Missing required fields: employee_id, start_date, end_date, platform' },
+        { error: 'Missing required fields: start_date, end_date, platform' },
         { status: 400 }
       );
     }
@@ -107,7 +102,6 @@ export async function POST(request: Request) {
     const { data: existing, error: checkError } = await supabase
       .from('employee_historical_metrics')
       .select('id, start_date, end_date')
-      .eq('employee_id', employee_id)
       .eq('platform', platform)
       .or(`and(start_date.lte.${end_date},end_date.gte.${start_date})`);
 
@@ -115,7 +109,7 @@ export async function POST(request: Request) {
       console.error('Error checking for overlap:', checkError);
     } else if (existing && existing.length > 0) {
       return NextResponse.json(
-        { error: `Periode ${start_date} s/d ${end_date} overlap dengan data yang sudah ada` },
+        { error: `Periode ${start_date} s/d ${end_date} overlap dengan data yang sudah ada untuk platform ${platform}` },
         { status: 409 }
       );
     }
@@ -124,7 +118,6 @@ export async function POST(request: Request) {
     const { data, error } = await supabase
       .from('employee_historical_metrics')
       .insert({
-        employee_id,
         start_date,
         end_date,
         platform,
