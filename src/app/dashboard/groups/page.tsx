@@ -23,7 +23,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 export default function CampaignsPage() {
   const supabase = createClient();
   // Centralize accrual masking cutoff (can be configured from env)
-  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2025-12-20';
+  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2026-01-02';
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [selected, setSelected] = useState<Campaign | null>(null);
@@ -65,9 +65,8 @@ export default function CampaignsPage() {
   const [userSeriesIG, setUserSeriesIG] = useState<any[] | null>(null);
   const [userTotals, setUserTotals] = useState<any | null>(null);
   const [userSeriesLoading, setUserSeriesLoading] = useState(false);
-  const [userMode, setUserMode] = useState<'postdate'|'accrual'>('accrual');
-  const [userInterval, setUserInterval] = useState<'daily'|'weekly'|'monthly'>('daily');
-  const [userAccrualWindow, setUserAccrualWindow] = useState<7|28|60>(7);
+  // User modal settings now directly inherit from parent page
+  // (removed separate userMode, userInterval, userAccrualWindow)
   const [showTotal, setShowTotal] = useState(true);
   const [showTikTok, setShowTikTok] = useState(true);
   const [showInstagram, setShowInstagram] = useState(true);
@@ -168,15 +167,19 @@ export default function CampaignsPage() {
         const effEnd = groupEnd;
         // Always load group metrics first
         let groupUrl: string;
+        
+        // FIXED: Always fetch from fixed start date for consistent baseline
+        const REALTIME_FIXED_START = '2026-01-03';
+        
         if (chartMode === 'accrual') {
           if (useCustomAccrualDates) {
-            // Custom date range - calculate days
-            const start = new Date(accrualCustomStart);
+            // Custom date range - ALWAYS fetch from fixed start for consistent baseline
+            const fixedStart = new Date(REALTIME_FIXED_START);
             const end = new Date(accrualCustomEnd);
-            const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-            groupUrl = `/api/campaigns/${selected.id}/accrual?days=${days}&cutoff=${encodeURIComponent(accrualCustomStart)}&snapshots_only=1&custom=1`;
-            console.log('[DEBUG] Custom Accrual URL:', groupUrl);
-            console.log('[DEBUG] Custom dates:', { accrualCustomStart, accrualCustomEnd, days });
+            const days = Math.ceil((end.getTime() - fixedStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+            groupUrl = `/api/campaigns/${selected.id}/accrual?days=${days}&cutoff=${encodeURIComponent(REALTIME_FIXED_START)}&snapshots_only=1&custom=1`;
+            console.log('[DEBUG] Custom Accrual URL (fixed start):', groupUrl);
+            console.log('[DEBUG] Custom dates:', { accrualCustomStart, accrualCustomEnd, fixedStart: REALTIME_FIXED_START, days });
           } else {
             groupUrl = `/api/campaigns/${selected.id}/accrual?days=${accrualWindow}&cutoff=${encodeURIComponent(accrualCutoff)}&snapshots_only=1`;
           }
@@ -192,12 +195,12 @@ export default function CampaignsPage() {
           lastDate: gData?.series_total?.[gData?.series_total?.length - 1]?.date
         });
         if (!gRes.ok) throw new Error(gData.error || 'Failed to load metrics');
-        // Mask accrual: zero values before cutoff for ALL platforms
+        // Mask accrual (realtime only): zero values sebelum cutoff global
         if (chartMode === 'accrual') {
-          const effectiveCutoff = useCustomAccrualDates ? accrualCustomStart : accrualCutoff;
+          const effectiveCutoff = accrualCutoff;
           const zeroBefore = (arr: any[] = []) => arr.map((it:any)=>{
             if (!it || typeof it !== 'object') return it;
-            if (String(it.date) < effectiveCutoff) {
+            if (String(it.date) <= effectiveCutoff) {
               const r:any = { ...it };
               if ('views' in r) r.views = 0;
               if ('likes' in r) r.likes = 0;
@@ -212,26 +215,33 @@ export default function CampaignsPage() {
           if (gData?.series_instagram) gData.series_instagram = zeroBefore(gData.series_instagram);
           if (gData?.series_total) gData.series_total = zeroBefore(gData.series_total);
           if (gData?.series) gData.series = zeroBefore(gData.series);
-        }
-        // Compute header totals from UNMASKED accrual within same range to reflect full period performance
-        let headerTotals = gData?.totals || null;
-        try {
-          if (chartMode === 'accrual') {
-            const unmaskedUrl = groupUrl + (groupUrl.includes('?') ? '&' : '?') + 'mask=0';
-            const umRes = await fetch(unmaskedUrl, { cache: 'no-store' });
-            const um = await umRes.json();
-            if (umRes.ok && (Array.isArray(um?.series_total) || Array.isArray(um?.series))) {
-              const baseArr = (um.series_total || um.series || []) as any[];
-              const sums = baseArr.reduce((a:any, s:any)=>({
-                views: (a.views||0) + Number(s.views||0),
-                likes: (a.likes||0) + Number(s.likes||0),
-                comments: (a.comments||0) + Number(s.comments||0)
-              }), { views:0, likes:0, comments:0 });
-              headerTotals = { ...(gData?.totals||{}), ...sums };
-            }
+          
+          // IMPORTANT: Filter to only include data within user-selected range
+          // This ensures consistency regardless of the fixed fetch start date
+          if (useCustomAccrualDates) {
+            const filterByRange = (arr: any[]) => arr.filter((d: any) => {
+              const dateStr = String(d.date).slice(0, 10);
+              return dateStr >= accrualCustomStart && dateStr <= accrualCustomEnd;
+            });
+            if (gData?.series_tiktok) gData.series_tiktok = filterByRange(gData.series_tiktok);
+            if (gData?.series_instagram) gData.series_instagram = filterByRange(gData.series_instagram);
+            if (gData?.series_total) gData.series_total = filterByRange(gData.series_total);
+            if (gData?.series) gData.series = filterByRange(gData.series);
+            console.log('[DEBUG] After range filter:', {
+              rangeStart: accrualCustomStart,
+              rangeEnd: accrualCustomEnd,
+              seriesLength: gData?.series_total?.length || 0
+            });
           }
-        } catch {}
-        setMetrics({ ...(gData||{}), totals: headerTotals || gData?.totals });
+        }
+        // Header totals should match the chart exactly -> sum from MASKED series currently shown
+        const baseArr = (gData?.series_total || gData?.series || []) as any[];
+        const headerSums = baseArr.reduce((a:any, s:any)=>({
+          views: (a.views||0) + Number(s.views||0),
+          likes: (a.likes||0) + Number(s.likes||0),
+          comments: (a.comments||0) + Number(s.comments||0)
+        }), { views:0, likes:0, comments:0 });
+        setMetrics({ ...(gData||{}), totals: headerSums });
 
         // Optionally load selected employees
         const DEFAULT_MAX = 12; // show more employees on the chart legend by default
@@ -248,11 +258,12 @@ export default function CampaignsPage() {
               url.searchParams.set('mode', 'accrual');
               url.searchParams.set('snapshots_only','1');
               if (useCustomAccrualDates) {
-                const start = new Date(accrualCustomStart);
+                // FIXED: Always fetch from fixed start for consistent baseline
+                const fixedStart = new Date(REALTIME_FIXED_START);
                 const end = new Date(accrualCustomEnd);
-                const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+                const days = Math.ceil((end.getTime() - fixedStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
                 url.searchParams.set('days', String(days));
-                url.searchParams.set('cutoff', accrualCustomStart);
+                url.searchParams.set('cutoff', REALTIME_FIXED_START);
                 url.searchParams.set('custom', '1');
               } else {
                 url.searchParams.set('days', String(accrualWindow));
@@ -283,10 +294,18 @@ export default function CampaignsPage() {
             }
             return it;
           });
+          // Filter by user-selected range for consistency
+          const filterByRange = (arr: any[]) => {
+            if (!useCustomAccrualDates) return arr;
+            return arr.filter((d: any) => {
+              const dateStr = String(d.date).slice(0, 10);
+              return dateStr >= accrualCustomStart && dateStr <= accrualCustomEnd;
+            });
+          };
           setCompareData(rows.map(r => ({ 
             id: r.id, 
             name: nameMap[r.id] || r.id, 
-            series: chartMode==='accrual' ? zeroBefore(r.data?.series || []) : (r.data?.series || [])
+            series: chartMode==='accrual' ? filterByRange(zeroBefore(r.data?.series || [])) : (r.data?.series || [])
           })));
         } else {
           setCompareData([]);
@@ -306,15 +325,19 @@ export default function CampaignsPage() {
       const accStart = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(accrualWindow-1)); return d.toISOString().slice(0,10); })();
       const effStart = chartMode==='accrual' ? (useCustomAccrualDates ? accrualCustomStart : accStart) : groupStart;
       const effEnd = chartMode==='accrual' ? (useCustomAccrualDates ? accrualCustomEnd : todayStr) : groupEnd;
-      const cutoff = useCustomAccrualDates ? accrualCustomStart : accrualCutoff;
+      const cutoff = accrualCutoff; // realtime di-mask oleh cutoff global
+      
+      // FIXED: Always use fixed start date for consistent baseline
+      const REALTIME_FIXED_START = '2026-01-03';
       
       let apiUrl: string;
       if (chartMode === 'accrual') {
         if (useCustomAccrualDates) {
-          const start = new Date(accrualCustomStart);
+          const fixedStart = new Date(REALTIME_FIXED_START);
           const end = new Date(accrualCustomEnd);
-          const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-          apiUrl = `/api/groups/${selected.id}/members?mode=accrual&days=${days}&cutoff=${encodeURIComponent(cutoff)}&snapshots_only=1&custom=1`;
+          const days = Math.ceil((end.getTime() - fixedStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+          // Pass both fixed cutoff for API and user range for frontend filtering
+          apiUrl = `/api/groups/${selected.id}/members?mode=accrual&days=${days}&cutoff=${encodeURIComponent(REALTIME_FIXED_START)}&snapshots_only=1&custom=1&range_start=${encodeURIComponent(accrualCustomStart)}&range_end=${encodeURIComponent(accrualCustomEnd)}`;
         } else {
           apiUrl = `/api/groups/${selected.id}/members?mode=accrual&days=${accrualWindow}&cutoff=${encodeURIComponent(cutoff)}&snapshots_only=1`;
         }
@@ -332,31 +355,46 @@ export default function CampaignsPage() {
   // No explicit UI for toggling; overlays will default to first few employees when chartCompareIds is empty (handled in loadMetrics)
 
   useEffect(() => {
-    // when selecting a user (employee), fetch its daily series within group date range
+    // when selecting a user (employee), fetch its daily series using PARENT page settings
     const load = async () => {
       if (!selected || !selectedUser) return;
       setUserSeriesLoading(true);
       try {
         const todayStr = new Date().toISOString().slice(0,10);
-        const accStart = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(userAccrualWindow-1)); return d.toISOString().slice(0,10); })();
-        const effStart = userMode==='accrual' ? accStart : groupStart;
-        const effEnd = userMode==='accrual' ? todayStr : groupEnd;
-        
+        // Use parent page settings for employee modal
+        let effStart: string;
+        let effEnd: string;
         let apiUrl = `/api/employees/${encodeURIComponent(selectedUser)}/metrics?campaign_id=${selected.id}`;
-        if (userMode === 'accrual') {
-          apiUrl += `&mode=accrual&days=${userAccrualWindow}&snapshots_only=1`;
+        
+        if (chartMode === 'accrual') {
+          if (useCustomAccrualDates) {
+            // Custom date range - same as parent
+            effStart = accrualCustomStart;
+            effEnd = accrualCustomEnd;
+            const days = Math.ceil((new Date(effEnd).getTime() - new Date(effStart).getTime()) / (1000 * 60 * 60 * 24)) + 1;
+            apiUrl += `&mode=accrual&days=${days}&cutoff=${encodeURIComponent(effStart)}&snapshots_only=1&custom=1`;
+          } else {
+            // Standard accrual window from parent
+            const accStart = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(accrualWindow-1)); return d.toISOString().slice(0,10); })();
+            effStart = accStart;
+            effEnd = todayStr;
+            apiUrl += `&mode=accrual&days=${accrualWindow}&snapshots_only=1`;
+          }
         } else {
+          // Post date mode - use group dates
+          effStart = groupStart;
+          effEnd = groupEnd;
           apiUrl += `&start=${effStart}&end=${effEnd}`;
         }
-        apiUrl += `&interval=${userInterval}`;
+        apiUrl += `&interval=${chartInterval}`;
         
         const res = await fetch(apiUrl, { cache: 'no-store' });
         const data = await res.json();
         if (res.ok) {
-          const effectiveCutoff = useCustomAccrualDates ? accrualCustomStart : accrualCutoff;
+          const effectiveCutoff = accrualCutoff; // realtime di-mask global
           const zeroBefore = (arr: any[] = []) => arr.map((it:any)=>{
             if (!it || typeof it !== 'object') return it;
-            if (String(it.date) < effectiveCutoff) {
+            if (String(it.date) <= effectiveCutoff) {
               const r:any = { ...it };
               if ('views' in r) r.views = 0;
               if ('likes' in r) r.likes = 0;
@@ -382,7 +420,7 @@ export default function CampaignsPage() {
       } finally { setUserSeriesLoading(false); }
     };
     load();
-  }, [selectedUser, selected, groupStart, groupEnd, userMode, userInterval, userAccrualWindow]);
+  }, [selectedUser, selected, groupStart, groupEnd, chartMode, chartInterval, accrualWindow, useCustomAccrualDates, accrualCustomStart, accrualCustomEnd]);
 
   // Refresh snapshot button removed; metrics and member totals follow date filter automatically
 
@@ -1240,7 +1278,7 @@ export default function CampaignsPage() {
                         )}
                       </div>
                       {/* Instagram accounts assigned in this group */}
-                      <div className="text-xs text-white/60">Akun Instagram (grup):
+                      <div className="text-xs text-white/60">Akun Instagram:
                         {Array.isArray(p.accounts_ig) && p.accounts_ig.length>0 ? (
                           <span> {Array.from(new Set<string>(p.accounts_ig as string[])).map((u:string, i:number)=> (
                             <span key={`${u}-ig-${i}`} className="inline-flex items-center gap-1 mr-2 mb-1">@{u}</span>
@@ -1249,23 +1287,6 @@ export default function CampaignsPage() {
                           <span> -</span>
                         )}
                       </div>
-                      {/* Instagram accounts from employee profile (display only) */}
-                      {(() => {
-                        const emp:any = (allUsers||[]).find((u:any)=> u.id === p.id) || null;
-                        const igExtras: string[] = emp?.extra_instagram_usernames || [];
-                        const igAll: string[] = [emp?.instagram_username, ...igExtras].filter(Boolean).map((u:string)=> String(u));
-                        return (
-                          <div className="text-xs text-white/60">Akun Instagram (profil):
-                            {igAll.length ? (
-                              <span> {Array.from(new Set(igAll)).map((u:string, i:number)=> (
-                                <span key={`${u}-profile-${i}`} className="inline-flex items-center gap-1 mr-2 mb-1">@{u}</span>
-                              ))}</span>
-                            ) : (
-                              <span> -</span>
-                            )}
-                          </div>
-                        )
-                      })()}
                     </div>
                   ))}
                   {!participants.length && <div className="text-white/60 text-sm">Belum ada Karyawan.</div>}
@@ -1407,37 +1428,33 @@ export default function CampaignsPage() {
               </div>
             </div>
             {(() => {
+              // Use parent page settings for period display
               const todayStr = new Date().toISOString().slice(0,10);
-              const accStart = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(userAccrualWindow-1)); return d.toISOString().slice(0,10); })();
-              const effStart = userMode==='accrual' ? accStart : groupStart;
-              const effEnd = userMode==='accrual' ? todayStr : groupEnd;
+              let effStart: string;
+              let effEnd: string;
+              if (chartMode === 'accrual') {
+                if (useCustomAccrualDates) {
+                  effStart = accrualCustomStart;
+                  effEnd = accrualCustomEnd;
+                } else {
+                  const accStart = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(accrualWindow-1)); return d.toISOString().slice(0,10); })();
+                  effStart = accStart;
+                  effEnd = todayStr;
+                }
+              } else {
+                effStart = groupStart;
+                effEnd = groupEnd;
+              }
               return (
                 <div className="mb-3 text-xs text-white/60">
                   Periode: {format(parseISO(effStart), 'd MMM yyyy', { locale: localeID })} — {format(parseISO(effEnd), 'd MMM yyyy', { locale: localeID })}
+                  <span className="ml-2 text-white/40">
+                    ({chartMode === 'accrual' ? 'Accrual' : 'Post Date'}{chartMode === 'accrual' && useCustomAccrualDates ? ' - Custom' : chartMode === 'accrual' ? ` - ${accrualWindow} hari` : ''}{chartMode !== 'accrual' ? ` - ${chartInterval === 'daily' ? 'Harian' : chartInterval === 'weekly' ? 'Mingguan' : 'Bulanan'}` : ''})
+                  </span>
                 </div>
               );
             })()}
-            <div className="flex items-center gap-3 text-xs mb-3 flex-wrap">
-              <span className="text-white/60">Mode:</span>
-              <button className={`px-2 py-1 rounded ${userMode==='accrual'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserMode('accrual')}>Accrual</button>
-              <button className={`px-2 py-1 rounded ${userMode==='postdate'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserMode('postdate')}>Post Date</button>
-              {userMode!=='accrual' && (
-                <>
-                  <span className="text-white/60 ml-2">Interval:</span>
-                  <button className={`px-2 py-1 rounded ${userInterval==='daily'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserInterval('daily')}>Harian</button>
-                  <button className={`px-2 py-1 rounded ${userInterval==='weekly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserInterval('weekly')}>Mingguan</button>
-                  <button className={`px-2 py-1 rounded ${userInterval==='monthly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserInterval('monthly')}>Bulanan</button>
-                </>
-              )}
-              {userMode==='accrual' && (
-                <div className="flex items-center gap-2 ml-2">
-                  <span className="text-white/60">Rentang:</span>
-                  <button className={`px-2 py-1 rounded ${userAccrualWindow===7?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserAccrualWindow(7)}>7 hari</button>
-                  <button className={`px-2 py-1 rounded ${userAccrualWindow===28?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserAccrualWindow(28)}>28 hari</button>
-                  <button className={`px-2 py-1 rounded ${userAccrualWindow===60?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setUserAccrualWindow(60)}>60 hari</button>
-                </div>
-              )}
-            </div>
+            {/* Settings inherited from parent page - no separate controls needed */}
             {userSeriesLoading && <p className="text-white/60">Memuat…</p>}
             {/* Toggle sumber data seperti grafik lain */}
             {!userSeriesLoading && (userSeries || userSeriesTT || userSeriesIG) && (

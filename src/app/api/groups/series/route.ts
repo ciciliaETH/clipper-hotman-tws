@@ -506,9 +506,9 @@ export async function GET(req: Request) {
 
       // Apply accrual cutoff to ALL platforms server-side for robustness
       const u = new URL(req.url);
-      const cutoff = String(u.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2025-12-17');
+      const cutoff = String(u.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
       const trim = u.searchParams.get('trim') === '1';
-      const zeroBefore = (arr:any[] = []) => arr.map((s:any)=> (String(s.date) < cutoff ? { ...s, views:0, likes:0, comments:0, shares:0, saves:0 } : s));
+      const zeroBefore = (arr:any[] = []) => arr.map((s:any)=> (String(s.date) <= cutoff ? { ...s, views:0, likes:0, comments:0, shares:0, saves:0 } : s));
       total = zeroBefore(total);
       total_tiktok = zeroBefore(total_tiktok);
       total_instagram = zeroBefore(total_instagram);

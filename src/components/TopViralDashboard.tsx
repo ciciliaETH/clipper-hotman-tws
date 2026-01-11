@@ -24,14 +24,19 @@ interface Video {
 
 interface TopViralDashboardProps {
   campaignId?: string
-  days?: 7 | 28
+  days?: number
   limit?: number
 }
 
-export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: TopViralDashboardProps) {
+export default function TopViralDashboard({ campaignId, days = 30, limit = 5 }: TopViralDashboardProps) {
   const [videos, setVideos] = useState<Video[]>([])
+  const [totalPosts, setTotalPosts] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Range selector: 'calendar' = bulan ini, 'days' = X hari terakhir
+  const [rangeMode, setRangeMode] = useState<'calendar' | 'days'>('calendar')
+  const [selectedDays, setSelectedDays] = useState<number>(days)
 
   useEffect(() => {
     const fetchVideos = async () => {
@@ -41,9 +46,15 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
       try {
         const url = new URL('/api/leaderboard/top-videos', window.location.origin)
         if (campaignId) url.searchParams.set('campaign_id', campaignId)
-        url.searchParams.set('days', String(days))
         url.searchParams.set('limit', String(limit))
         url.searchParams.set('platform', 'all')
+        if (rangeMode === 'calendar') {
+          url.searchParams.set('mode', 'calendar')
+          // fallback days value (not used by API in calendar mode)
+          url.searchParams.set('days', String(selectedDays))
+        } else {
+          url.searchParams.set('days', String(selectedDays))
+        }
         const res = await fetch(url.toString())
         
         if (!res.ok) {
@@ -52,6 +63,7 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
         
         const data = await res.json()
         setVideos(data.videos || [])
+        setTotalPosts(data.total_found || 0)
       } catch (err: any) {
         setError(err.message || 'Error loading videos')
       } finally {
@@ -60,7 +72,7 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
     }
 
     fetchVideos()
-  }, [campaignId, days, limit])
+  }, [campaignId, limit, rangeMode, selectedDays])
 
   const formatNumber = (num: number): string => {
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
@@ -74,7 +86,7 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
         <div className="flex items-center gap-3 mb-6">
           <TrendingUp className="w-6 h-6 text-pink-500" />
           <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
-          <span className="text-sm text-white/60">({days} hari terakhir)</span>
+          <span className="text-sm text-white/60">(bulan ini)</span>
         </div>
         
         <div className="space-y-4">
@@ -113,7 +125,7 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
         <div className="flex items-center gap-3 mb-4">
           <TrendingUp className="w-6 h-6 text-white/60" />
           <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
-          <span className="text-sm text-white/60">({days} hari terakhir)</span>
+          <span className="text-sm text-white/60">(bulan ini)</span>
         </div>
         <p className="text-white/60 text-sm">Belum ada data video</p>
       </div>
@@ -122,10 +134,29 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
 
   return (
     <div className="glass p-6 rounded-2xl">
-      <div className="flex items-center gap-3 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-6">
         <TrendingUp className="w-6 h-6 text-pink-500" />
-        <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
-        <span className="text-sm text-white/60">({days} hari terakhir, berdasarkan accrual)</span>
+        <div className="flex items-center gap-3">
+          <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
+          <span className="text-sm text-white/60">
+            {rangeMode === 'calendar' ? '(bulan ini)' : `(${selectedDays} hari terakhir)`}
+          </span>
+        </div>
+        {/* Range controls */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => { setRangeMode('days'); setSelectedDays(7); }}
+            className={`px-3 py-1.5 rounded-lg text-sm border transition ${rangeMode==='days' && selectedDays===7 ? 'bg-white/20 text-white border-white/30' : 'bg-white/10 text-white/80 border-white/10 hover:bg-white/15'}`}
+          >7 hari</button>
+          <button
+            onClick={() => { setRangeMode('days'); setSelectedDays(30); }}
+            className={`px-3 py-1.5 rounded-lg text-sm border transition ${rangeMode==='days' && selectedDays===30 ? 'bg-white/20 text-white border-white/30' : 'bg-white/10 text-white/80 border-white/10 hover:bg-white/15'}`}
+          >30 hari</button>
+          <button
+            onClick={() => setRangeMode('calendar')}
+            className={`px-3 py-1.5 rounded-lg text-sm border transition ${rangeMode==='calendar' ? 'bg-white/20 text-white border-white/30' : 'bg-white/10 text-white/80 border-white/10 hover:bg-white/15'}`}
+          >Bulan ini</button>
+        </div>
       </div>
 
       <div className="space-y-4">
@@ -242,12 +273,11 @@ export default function TopViralDashboard({ campaignId, days = 7, limit = 5 }: T
       <div className="mt-6 pt-4 border-t border-white/10">
         <div className="text-center text-sm text-white/60">
           <p>
+            Total Posts: <span className="text-white font-semibold">{totalPosts}</span>
+            {' • '}
             Total engagement: <span className="text-white font-semibold">
               {formatNumber(videos.reduce((sum, v) => sum + v.metrics.total_engagement, 0))}
             </span>
-          </p>
-          <p className="mt-1 text-xs">
-            💡 Data berdasarkan pertumbuhan (accrual) dalam {days} hari terakhir
           </p>
         </div>
       </div>

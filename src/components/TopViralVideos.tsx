@@ -37,14 +37,14 @@ interface TopVideosResponse {
 interface TopViralVideosProps {
   campaignId: string;
   platform?: 'all' | 'tiktok' | 'instagram';
-  days?: 7 | 28;
+  days?: number;
   limit?: number;
 }
 
 export default function TopViralVideos({
   campaignId,
   platform = 'all',
-  days = 7,
+  days = 30,
   limit = 10
 }: TopViralVideosProps) {
   const [data, setData] = useState<TopVideosResponse | null>(null);

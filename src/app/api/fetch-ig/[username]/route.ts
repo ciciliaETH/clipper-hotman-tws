@@ -23,8 +23,33 @@ const AGG_IG_PAGE_SIZE = Number(process.env.AGGREGATOR_PAGE_SIZE || 50); // use 
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// RapidAPI host for media details (for getting taken_at)
+const IG_MEDIA_API = 'instagram-media-api.p.rapidapi.com';
+
 function admin() {
   return createAdmin(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+}
+
+// Helper to fetch taken_at from RapidAPI media/shortcode_reels endpoint
+async function fetchTakenAt(code: string): Promise<number | null> {
+  if (!code) return null;
+  try {
+    const j = await rapidApiRequest<any>({
+      url: `https://${IG_MEDIA_API}/media/shortcode_reels`,
+      method: 'POST',
+      rapidApiHost: IG_MEDIA_API,
+      body: { shortcode: code, proxy: '' },
+      timeoutMs: 10000,
+      maxPerKeyRetries: 1
+    });
+    // Response: data.xdt_api__v1__media__shortcode__web_info.items[0].taken_at
+    const items = j?.data?.xdt_api__v1__media__shortcode__web_info?.items || j?.items || [];
+    const item = items[0] || j;
+    const ts = parseMs(item?.taken_at) || parseMs(item?.taken_at_timestamp);
+    return ts;
+  } catch {
+    return null;
+  }
 }
 
 // Helper to extract caption from various API response formats
@@ -159,14 +184,25 @@ export async function GET(req: Request, context: any) {
             newReelsCount++;
 
             const code = String(media?.code || '');
-            // Derive post_date: prefer exact timestamp via linksMap/resolveTimestamp; fallback to today
+            // Derive post_date: prefer exact timestamp from media.taken_at, then linksMap, then RapidAPI, then resolveTimestamp; fallback to today
             let ms: number | null = null;
-            if (code && linksMap.has(code)) ms = linksMap.get(code)!;
+            // Try to get taken_at directly from media object first (most reliable)
+            const takenAt = media?.taken_at || media?.taken_at_timestamp || node?.taken_at || node?.taken_at_timestamp;
+            if (takenAt) {
+              ms = parseMs(takenAt);
+            }
+            if (!ms && code && linksMap.has(code)) ms = linksMap.get(code)!;
+            // Aggregator doesn't return taken_at, so fetch it from RapidAPI
+            if (!ms && code) {
+              ms = await fetchTakenAt(code);
+              if (ms && debug) console.log(`[IG Fetch] Fetched taken_at for ${code}: ${new Date(ms).toISOString()}`);
+            }
             if (!ms) {
-              const resolved = await resolveTimestamp(media, node);
+              const resolved = await resolveTimestamp(media, node, IG_HOST);
               if (resolved) ms = resolved;
             }
             const post_date = ms ? new Date(ms).toISOString().slice(0,10) : new Date().toISOString().slice(0, 10);
+            const taken_at = ms ? new Date(ms).toISOString() : null; // Store actual timestamp
             const caption = extractCaption(media, node);
             const play = Number(media?.play_count ?? media?.view_count ?? media?.video_view_count ?? 0) || 0;
             const like = Number(media?.like_count ?? 0) || 0;
@@ -177,7 +213,8 @@ export async function GET(req: Request, context: any) {
               code: code || null, 
               caption: caption || null, 
               username: norm, 
-              post_date, 
+              post_date,
+              taken_at, // Include actual timestamp if available
               play_count: play, 
               like_count: like, 
               comment_count: comment 
@@ -447,7 +484,8 @@ export async function GET(req: Request, context: any) {
         }
       }
       if ((play + like + comment) === 0) continue;
-      upserts.push({ id, code: code || null, caption: caption || null, username: norm, post_date, play_count: play, like_count: like, comment_count: comment });
+      const taken_at = ms ? new Date(ms).toISOString() : null;
+      upserts.push({ id, code: code || null, caption: caption || null, username: norm, post_date, taken_at, play_count: play, like_count: like, comment_count: comment });
     }
 
     if (allowUsernameFallback && upserts.length === 0 && linksMap.size > 0) {
@@ -481,7 +519,8 @@ export async function GET(req: Request, context: any) {
           }
         }
         if ((views + likes + comments) === 0) continue;
-        upserts.push({ id: sc, code: sc, caption: null, username: norm, post_date, play_count: views, like_count: likes, comment_count: comments });
+        const taken_at = ts ? new Date(ts).toISOString() : null;
+        upserts.push({ id: sc, code: sc, caption: null, username: norm, post_date, taken_at, play_count: views, like_count: likes, comment_count: comments });
         telemetry.fallbackLinksUsed += 1;
       }
     }
@@ -525,12 +564,14 @@ export async function GET(req: Request, context: any) {
               }
             }
             if (post_date && (views + likes + comments) > 0) {
+              const taken_at = ms ? new Date(ms).toISOString() : null;
               upserts.push({ 
                 id: sc, 
                 code: sc,
                 caption: caption || null,
                 username: norm, 
                 post_date, 
+                taken_at,
                 play_count: views, 
                 like_count: likes, 
                 comment_count: comments 
@@ -551,7 +592,8 @@ export async function GET(req: Request, context: any) {
             }
           }
           if ((views + likes + comments) === 0) continue;
-          upserts.push({ id: sc, code: sc, caption: null, username: norm, post_date, play_count: views, like_count: likes, comment_count: comments });
+          const taken_at = ms ? new Date(ms).toISOString() : null;
+          upserts.push({ id: sc, code: sc, caption: null, username: norm, post_date, taken_at, play_count: views, like_count: likes, comment_count: comments });
         }
       }
     }
@@ -586,7 +628,8 @@ export async function GET(req: Request, context: any) {
           if ((play + like + comment) === 0) continue;
           const code = String(it?.code || '');
           const caption = extractCaption(it);
-          upserts.push({ id, code: code || null, caption: caption || null, username: norm, post_date, play_count: play, like_count: like, comment_count: comment });
+          const taken_at = ms ? new Date(ms).toISOString() : null;
+          upserts.push({ id, code: code || null, caption: caption || null, username: norm, post_date, taken_at, play_count: play, like_count: like, comment_count: comment });
         }
         if (upserts.length > 0) source = 'scraper:user_id';
       }

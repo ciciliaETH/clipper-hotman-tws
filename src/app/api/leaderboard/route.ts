@@ -34,7 +34,7 @@ export async function GET(req: Request) {
     if (mode === 'accrual' && (scope === 'employees' || scope === 'all')) {
       const daysParam = Number(url.searchParams.get('days') || '7');
       const windowDays = daysParam > 0 ? daysParam : 7;
-      const cutoffISO = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE || '2025-12-20');
+      const cutoffISO = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE || '2026-01-02');
       const customMode = url.searchParams.get('custom') === '1';
       
       let startISO: string;

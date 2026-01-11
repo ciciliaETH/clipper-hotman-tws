@@ -35,7 +35,7 @@ export async function GET(req: Request, ctx: any) {
     // Rolling preset window for accrual; ignore arbitrary start/end when days provided
     const daysQ = Number(url.searchParams.get('days') || '0');
     const windowDays = daysQ > 0 ? daysQ : 7;
-    const cutoff = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2025-12-17');
+    const cutoff = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
     const customMode = url.searchParams.get('custom') === '1';
     
     // Calculate date range
@@ -48,7 +48,7 @@ export async function GET(req: Request, ctx: any) {
       cutoff, 
       customMode,
       hasCutoff: url.searchParams.has('cutoff'),
-      defaultCutoff: process.env.ACCRUAL_CUTOFF_DATE || '2025-12-17'
+      defaultCutoff: process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02'
     });
     
     if (customMode) {
@@ -184,7 +184,9 @@ export async function GET(req: Request, ctx: any) {
         }
       }
       
-      // include one day before start as baseline so first day's delta tidak hilang
+      // Baseline lookback: cari snapshot terakhir SEBELUM start (tidak harus tepat H-1)
+      const baselineLookbackDays = 30;
+      const baselineFrom = new Date(startISO+'T00:00:00Z'); baselineFrom.setUTCDate(baselineFrom.getUTCDate()-baselineLookbackDays);
       const prev = new Date(startISO+'T00:00:00Z'); prev.setUTCDate(prev.getUTCDate()-1);
       const prevISO = prev.toISOString().slice(0,10);
       const { data: rows } = await admin
@@ -192,7 +194,7 @@ export async function GET(req: Request, ctx: any) {
         .select('user_id, platform, views, likes, comments, shares, saves, captured_at')
         .in('user_id', ids)
         .eq('platform', platform)
-        .gte('captured_at', prevISO + 'T00:00:00Z')
+        .gte('captured_at', baselineFrom.toISOString().slice(0,10) + 'T00:00:00Z')
         .lte('captured_at', endISO + 'T23:59:59Z')
         .order('user_id', { ascending: true })
         .order('captured_at', { ascending: true });
@@ -221,10 +223,17 @@ export async function GET(req: Request, ctx: any) {
           const d = String((r as any).captured_at).slice(0,10);
           lastByDay.set(d, r); // rows are ordered; last set wins
         }
-        // Determine baseline value = last snapshot on baseline day (windowStartISO-1)
-        const baselineDay = new Date(startISO+'T00:00:00Z'); baselineDay.setUTCDate(baselineDay.getUTCDate()-1);
-        const baselineISO = baselineDay.toISOString().slice(0,10);
-        let prevSnap = lastByDay.get(baselineISO) || null;
+        // Determine baseline = snapshot terakhir SEBELUM start (scan mundur hingga baselineLookbackDays)
+        let prevSnap:any = null;
+        {
+          const base = new Date(startISO+'T00:00:00Z');
+          for (let i=1;i<=baselineLookbackDays;i++) {
+            const d = new Date(base); d.setUTCDate(d.getUTCDate()-i);
+            const key = d.toISOString().slice(0,10);
+            const cand = lastByDay.get(key);
+            if (cand) { prevSnap = cand; break; }
+          }
+        }
         for (const d of days) {
           const cur = lastByDay.get(d);
           if (cur && prevSnap) {
@@ -376,7 +385,7 @@ export async function GET(req: Request, ctx: any) {
     // Apply masking optionally (default on). When mask=0, return full values.
     // Now requested: cutoff applies to ALL platforms.
     if (maskParam !== '0') {
-      const mask = (arr:any[]) => arr.map((s:any)=> (s.date < cutoff ? { ...s, views:0, likes:0, comments:0, shares:0, saves:0 } : s));
+      const mask = (arr:any[]) => arr.map((s:any)=> (s.date <= cutoff ? { ...s, views:0, likes:0, comments:0, shares:0, saves:0 } : s));
       seriesTikTok.splice(0, seriesTikTok.length, ...mask(seriesTikTok));
       seriesInstagram.splice(0, seriesInstagram.length, ...mask(seriesInstagram));
       seriesTotal = mask(seriesTotal);

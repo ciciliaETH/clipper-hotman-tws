@@ -395,6 +395,7 @@ async function getTikTokData(username: string, cachedSecUid?: string, window?: {
         username,
         sec_uid: secUid,
         post_date: postDate.toISOString().slice(0, 10),
+        taken_at: postDate.toISOString(), // Store actual TikTok create_time
         title: title || null,
         comment_count: readStat(post,'comment'),
         play_count: readStat(post,'play'),
@@ -924,14 +925,14 @@ export async function GET(request: Request, context: any) {
         if (isNaN(d.getTime())) continue;
         if (d < minDate) continue;
         if (maxDate && d > maxDate) continue;
-        const vId = v.aweme_id || v.video_id || v.id || deriveVideoId(v);
+        const vId = v.video_id || v.id || deriveVideoId(v);
         const vViews = readStat(v,'play');
         const vLikes = readStat(v,'digg');
         const vComments = readStat(v,'comment');
         const vShares = readStat(v,'share');
         const vSaves = readStat(v,'save');
         totals.views += vViews; totals.likes += vLikes; totals.comments += vComments; totals.shares += vShares; totals.saves += vSaves; totals.posts_total += 1;
-        if (vId) toUpsert.push({ video_id: String(vId), username: normalized, sec_uid: tiktok_sec_uid || null, post_date: d.toISOString().slice(0, 10), play_count: vViews, digg_count: vLikes, comment_count: vComments, share_count: vShares, save_count: vSaves });
+        if (vId) toUpsert.push({ video_id: String(vId), username: normalized, sec_uid: tiktok_sec_uid || null, post_date: d.toISOString().slice(0, 10), taken_at: d.toISOString(), play_count: vViews, digg_count: vLikes, comment_count: vComments, share_count: vShares, save_count: vSaves });
       }
       if (toUpsert.length) {
         const chunkSize = 500;
@@ -1158,7 +1159,7 @@ export async function GET(request: Request, context: any) {
       }
       
       // Parse video ID - support multiple formats
-      const vId = v.aweme_id || v.video_id || v.id || v.awemeId || deriveVideoId(v);
+      const vId = v.video_id || v.id || deriveVideoId(v);
       
       if (!vId) {
         console.log(`[TikTok Parse] SKIP: No video ID found`, v);
@@ -1177,7 +1178,7 @@ export async function GET(request: Request, context: any) {
       console.log(`[TikTok Parse] ✅ Video ${vId}: views=${vViews}, likes=${vLikes}, comments=${vComments}, date=${d.toISOString().slice(0,10)}`);
       
       totals.views += vViews; totals.likes += vLikes; totals.comments += vComments; totals.shares += vShares; totals.saves += vSaves; totals.posts_total += 1;
-      if (vId) toUpsert.push({ video_id: String(vId), username: normalized, sec_uid: tiktok_sec_uid || null, post_date: d.toISOString().slice(0, 10), play_count: vViews, digg_count: vLikes, comment_count: vComments, share_count: vShares, save_count: vSaves });
+      if (vId) toUpsert.push({ video_id: String(vId), username: normalized, sec_uid: tiktok_sec_uid || null, post_date: d.toISOString().slice(0, 10), taken_at: d.toISOString(), play_count: vViews, digg_count: vLikes, comment_count: vComments, share_count: vShares, save_count: vSaves });
     }
     
     console.log(`[TikTok Parse] ${normalized}: Parsed ${toUpsert.length}/${videos.length} videos. Total stats: views=${totals.views}, likes=${totals.likes}`);

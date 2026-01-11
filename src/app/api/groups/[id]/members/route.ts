@@ -51,12 +51,17 @@ export async function GET(req: Request, context: any) {
     const { searchParams } = new URL(req.url);
     let start = searchParams.get('start');
     let end = searchParams.get('end');
-    const cutoffParam = String(searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2025-12-17');
+    const cutoffParam = String(searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
     const mode = (searchParams.get('mode') || 'postdate').toLowerCase();
     const snapshotsOnly = searchParams.get('snapshots_only') !== '0';
     const daysQ = Number(searchParams.get('days')||'0');
     const windowDays = daysQ > 0 ? daysQ : 0;
     const customMode = searchParams.get('custom') === '1';
+    // FIXED: Support range filtering for consistent baseline
+    // range_start and range_end specify the user-selected range for filtering results
+    // while cutoff/days determine the baseline for delta calculations
+    const rangeStart = searchParams.get('range_start');
+    const rangeEnd = searchParams.get('range_end');
     
     if (mode==='accrual' && windowDays>0) {
       // Check if custom date mode
@@ -202,7 +207,8 @@ export async function GET(req: Request, context: any) {
     const requiredHashtags = (campaign as any)?.required_hashtags || null;
 
     // Helper: compute accrual strictly from snapshots for a single user (exactly seperti modal detail)
-    const accrualForUser = async (uid: string, startISO: string, endISO: string, cutoffISO: string) => {
+    // Added filterStart and filterEnd parameters for range filtering while maintaining consistent baseline
+    const accrualForUser = async (uid: string, startISO: string, endISO: string, cutoffISO: string, filterStart?: string, filterEnd?: string) => {
       const prev = new Date(startISO+'T00:00:00Z'); prev.setUTCDate(prev.getUTCDate()-1);
       const prevISO = prev.toISOString().slice(0,10);
       const { data: rows } = await supabase
@@ -226,16 +232,25 @@ export async function GET(req: Request, context: any) {
         days.push(d.toISOString().slice(0,10));
       }
       let totals = { views:0, likes:0, comments:0, shares:0, saves:0 };
+      
+      // Use filter range if provided, otherwise use full range
+      const effectiveFilterStart = filterStart || startISO;
+      const effectiveFilterEnd = filterEnd || endISO;
+      
       // TT
       let prevTT:any = lastTT.get(prevISO) || null;
       for (const key of days) {
         const cur = lastTT.get(key);
+        // Only accumulate delta, but always update prevTT for correct baseline tracking
         if (cur && prevTT && key >= cutoffISO) {
-          totals.views += Math.max(0, Number((cur as any).views||0) - Number((prevTT as any).views||0));
-          totals.likes += Math.max(0, Number((cur as any).likes||0) - Number((prevTT as any).likes||0));
-          totals.comments += Math.max(0, Number((cur as any).comments||0) - Number((prevTT as any).comments||0));
-          totals.shares += Math.max(0, Number((cur as any).shares||0) - Number((prevTT as any).shares||0));
-          totals.saves += Math.max(0, Number((cur as any).saves||0) - Number((prevTT as any).saves||0));
+          // Only add to totals if within user-selected filter range
+          if (key >= effectiveFilterStart && key <= effectiveFilterEnd) {
+            totals.views += Math.max(0, Number((cur as any).views||0) - Number((prevTT as any).views||0));
+            totals.likes += Math.max(0, Number((cur as any).likes||0) - Number((prevTT as any).likes||0));
+            totals.comments += Math.max(0, Number((cur as any).comments||0) - Number((prevTT as any).comments||0));
+            totals.shares += Math.max(0, Number((cur as any).shares||0) - Number((prevTT as any).shares||0));
+            totals.saves += Math.max(0, Number((cur as any).saves||0) - Number((prevTT as any).saves||0));
+          }
         }
         if (cur) prevTT = cur;
       }
@@ -244,11 +259,14 @@ export async function GET(req: Request, context: any) {
       for (const key of days) {
         const cur = lastIG.get(key);
         if (cur && prevIG && key >= cutoffISO) {
-          totals.views += Math.max(0, Number((cur as any).views||0) - Number((prevIG as any).views||0));
-          totals.likes += Math.max(0, Number((cur as any).likes||0) - Number((prevIG as any).likes||0));
-          totals.comments += Math.max(0, Number((cur as any).comments||0) - Number((prevIG as any).comments||0));
-          totals.shares += Math.max(0, Number((cur as any).shares||0) - Number((prevIG as any).shares||0));
-          totals.saves += Math.max(0, Number((cur as any).saves||0) - Number((prevIG as any).saves||0));
+          // Only add to totals if within user-selected filter range
+          if (key >= effectiveFilterStart && key <= effectiveFilterEnd) {
+            totals.views += Math.max(0, Number((cur as any).views||0) - Number((prevIG as any).views||0));
+            totals.likes += Math.max(0, Number((cur as any).likes||0) - Number((prevIG as any).likes||0));
+            totals.comments += Math.max(0, Number((cur as any).comments||0) - Number((prevIG as any).comments||0));
+            totals.shares += Math.max(0, Number((cur as any).shares||0) - Number((prevIG as any).shares||0));
+            totals.saves += Math.max(0, Number((cur as any).saves||0) - Number((prevIG as any).saves||0));
+          }
         }
         if (cur) prevIG = cur;
       }
@@ -427,12 +445,19 @@ export async function GET(req: Request, context: any) {
         }
 
         // Accumulate to totals per user
+        // Use rangeStart/rangeEnd for filtering if provided
+        const effectiveFilterStart = rangeStart || start;
+        const effectiveFilterEnd = rangeEnd || end;
+        
         accrualPosts = new Map<string, number>();
         for (const empId of empIds) {
           const map = perUserDay.get(empId) || new Map();
           let v=0,l=0,c=0,s=0,sv=0;
           for (const [d, val] of map.entries()) {
             if (d < cutoffParam) continue;
+            // Only include days within the user-selected filter range
+            if (effectiveFilterStart && d < effectiveFilterStart) continue;
+            if (effectiveFilterEnd && d > effectiveFilterEnd) continue;
             v += Number(val.views||0); l += Number(val.likes||0); c += Number(val.comments||0); s += Number(val.shares||0); sv += Number(val.saves||0);
           }
           const tot = accrualTotals.get(empId) || { views:0, likes:0, comments:0, shares:0, saves:0 };
@@ -442,15 +467,25 @@ export async function GET(req: Request, context: any) {
           let posts = 0;
           if (!snapshotsOnly) {
             const tmap = perUserDayTT.get(empId) || new Map();
-            for (const [d, vv] of tmap.entries()) { if (d >= cutoffParam) posts += Number((vv as any).posts||0); }
+            for (const [d, vv] of tmap.entries()) { 
+              if (d < cutoffParam) continue;
+              if (effectiveFilterStart && d < effectiveFilterStart) continue;
+              if (effectiveFilterEnd && d > effectiveFilterEnd) continue;
+              posts += Number((vv as any).posts||0); 
+            }
             const imap = perUserDayIG.get(empId) || new Map();
-            for (const [d, vv] of imap.entries()) { if (d >= cutoffParam) posts += Number((vv as any).posts||0); }
+            for (const [d, vv] of imap.entries()) { 
+              if (d < cutoffParam) continue;
+              if (effectiveFilterStart && d < effectiveFilterStart) continue;
+              if (effectiveFilterEnd && d > effectiveFilterEnd) continue;
+              posts += Number((vv as any).posts||0); 
+            }
           }
           accrualPosts.set(empId, posts);
           // Safety: jika akumulasi via map di atas tidak ada/0, hitung ulang per pengguna langsung dari snapshots
           const totVal = accrualTotals.get(empId);
           if (!totVal || (totVal.views+totVal.likes+totVal.comments+totVal.shares+totVal.saves) === 0) {
-            const fixed = await accrualForUser(empId, start!, end!, cutoffParam);
+            const fixed = await accrualForUser(empId, start!, end!, cutoffParam, rangeStart || undefined, rangeEnd || undefined);
             accrualTotals.set(empId, fixed);
           }
         }
@@ -526,15 +561,59 @@ export async function GET(req: Request, context: any) {
       for (const u of accountUsernames) assignmentByUsername[u] = { employee_id: empId, name: user.full_name || user.email || user.tiktok_username };
 
       // totals: STRICT MODE
-      // - accrual: gunakan hasil accrualTotals saja (tanpa fallback posts_daily)
+      // - accrual: gunakan hasil accrualTotals untuk views/likes/comments/shares, posts dari *_posts_daily (sama seperti post date)
       // - postdate: gunakan agregat posts_daily/snapshot seperti sebelumnya
       let totals = { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, posts: 0 } as any;
       if (mode === 'accrual') {
         // Hitung persis seperti modal: accrual langsung per user dari snapshots
+        // Use rangeStart/rangeEnd for filtering if provided
         const startISO = start!; const endISO = end!; const cutoffISO = cutoffParam;
-        const acc = await accrualForUser(empId, startISO, endISO, cutoffISO);
+        const acc = await accrualForUser(empId, startISO, endISO, cutoffISO, rangeStart || undefined, rangeEnd || undefined);
         totals.views = acc.views; totals.likes = acc.likes; totals.comments = acc.comments; totals.shares = acc.shares; totals.saves = acc.saves;
-        totals.posts = 0;
+        
+        // Posts: ambil dari *_posts_daily dengan logika SAMA PERSIS seperti mode post date
+        // Gunakan rangeStart/rangeEnd jika ada, else gunakan start/end
+        const postsStart = rangeStart || startISO;
+        const postsEnd = rangeEnd || endISO;
+        let postsCount = 0;
+        
+        // TikTok posts dari tiktok_posts_daily
+        if (accountUsernames.length > 0) {
+          const { data: ttPosts } = await supabase
+            .from('tiktok_posts_daily')
+            .select('username, title')
+            .in('username', accountUsernames)
+            .gte('post_date', postsStart)
+            .lte('post_date', postsEnd);
+          for (const r of ttPosts || []) {
+            // Apply hashtag filter jika ada
+            if (requiredHashtags && requiredHashtags.length) {
+              const title = String((r as any).title || '');
+              if (!hasRequiredHashtag(title, requiredHashtags)) continue;
+            }
+            postsCount += 1;
+          }
+        }
+        
+        // Instagram posts dari instagram_posts_daily
+        if (accountIG.length > 0) {
+          const { data: igPosts } = await supabase
+            .from('instagram_posts_daily')
+            .select('username, caption')
+            .in('username', accountIG)
+            .gte('post_date', postsStart)
+            .lte('post_date', postsEnd);
+          for (const r of igPosts || []) {
+            // Apply hashtag filter jika ada
+            if (requiredHashtags && requiredHashtags.length) {
+              const caption = String((r as any).caption || '');
+              if (!hasRequiredHashtag(caption, requiredHashtags)) continue;
+            }
+            postsCount += 1;
+          }
+        }
+        
+        totals.posts = postsCount;
       } else if (sumsByUsername || sumsByUsernameIG) {
         if (sumsByUsername) {
           for (const u of accountUsernames) {

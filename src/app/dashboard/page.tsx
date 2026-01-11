@@ -34,13 +34,15 @@ export default function DashboardTotalPage() {
   const [weeklyView, setWeeklyView] = useState<boolean>(true); // Changed to true
   const [platformFilter, setPlatformFilter] = useState<'all'|'tiktok'|'instagram'>('all');
   const [showHistorical, setShowHistorical] = useState<boolean>(true); // Changed to true
+  const [showPosts, setShowPosts] = useState<boolean>(true); // Show posts line on chart
   const [historicalData, setHistoricalData] = useState<any[]>([]);
+  const [postsData, setPostsData] = useState<any[]>([]); // Posts per day/period
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [activeCampaignId, setActiveCampaignId] = useState<string | null>(null);
   const [activeCampaignName, setActiveCampaignName] = useState<string | null>(null);
-  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2025-12-20';
+  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2026-01-02';
 
   const palette = ['#3b82f6','#ef4444','#22c55e','#eab308','#8b5cf6','#06b6d4','#f97316','#f43f5e','#10b981'];
 
@@ -73,31 +75,123 @@ export default function DashboardTotalPage() {
         };
         
         // Build API URLs with custom date support
-        const buildAccrualUrl = (campaignId: string) => {
+        const buildAccrualUrl = (campaignId: string, overrideStart?: string, overrideDays?: number) => {
+          // In custom mode, cutoff param represents START DATE for the window
+          // Global cutoff is applied server-side only for masking, not for range
           if (useCustomAccrualDates) {
-            const start = new Date(accrualCustomStart);
+            const startStr = overrideStart || accrualCustomStart;
+            const start = new Date(startStr);
             const end = new Date(accrualCustomEnd);
-            const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-            return `/api/campaigns/${encodeURIComponent(campaignId)}/accrual?days=${days}&snapshots_only=1&cutoff=${encodeURIComponent(accrualCustomStart)}&custom=1`;
+            const days = overrideDays || (Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+            return `/api/campaigns/${encodeURIComponent(campaignId)}/accrual?days=${days}&snapshots_only=1&cutoff=${encodeURIComponent(startStr)}&custom=1`;
           } else {
+            // Preset rolling window uses days + server will derive start from today
             return `/api/campaigns/${encodeURIComponent(campaignId)}/accrual?days=${accrualWindow}&snapshots_only=1&cutoff=${encodeURIComponent(accrualCutoff)}`;
           }
         };
         
-        const resps = await Promise.all((campaigns||[]).map((c:any)=> fetch(buildAccrualUrl(c.id), { cache: 'no-store' })));        
-        const accs = await Promise.all(resps.map(r=> r.ok ? r.json() : Promise.resolve(null)));
-        const ttAll: any[][] = []; const igAll: any[][] = []; const totalAll: any[][] = [];
-        accs.forEach((acc:any, idx:number)=>{
-          if (!acc) return;
-          const gid = campaigns[idx]?.id;
-          const gname = campaigns[idx]?.name || gid;
-          groups.push({ id: gid, name: gname, series: acc?.series_total||[], series_tiktok: acc?.series_tiktok||[], series_instagram: acc?.series_instagram||[] });
-          ttAll.push(acc?.series_tiktok||[]); igAll.push(acc?.series_instagram||[]); totalAll.push(acc?.series_total||[]);
-        });
-        const total = sumByDate(totalAll);
-        const total_tiktok = sumByDate(ttAll);
-        const total_instagram = sumByDate(igAll);
-        json = { interval:'daily', start: effStart, end: effEnd, groups, total, total_tiktok, total_instagram };
+        // Helper to generate week ranges
+        const generateWeekRanges = (startStr: string, endStr: string) => {
+          const weeks: Array<{start: string, end: string, days: number}> = [];
+          const startDate = new Date(startStr + 'T00:00:00Z');
+          const endDate = new Date(endStr + 'T00:00:00Z');
+          
+          let weekStart = new Date(startDate);
+          while (weekStart <= endDate) {
+            const weekEnd = new Date(weekStart);
+            weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+            
+            // Clamp to end date
+            const actualEnd = weekEnd > endDate ? endDate : weekEnd;
+            const days = Math.floor((actualEnd.getTime() - weekStart.getTime()) / (1000*60*60*24)) + 1;
+            
+            weeks.push({
+              start: weekStart.toISOString().slice(0, 10),
+              end: actualEnd.toISOString().slice(0, 10),
+              days
+            });
+            
+            // Move to next week
+            weekStart = new Date(weekStart);
+            weekStart.setUTCDate(weekStart.getUTCDate() + 7);
+          }
+          return weeks;
+        };
+        
+        // Historical cutoff: data sebelum/sama dengan tanggal ini dari historical, setelahnya dari real-time
+        const HISTORICAL_CUTOFF = '2026-01-02';
+        
+        console.log('[ACCRUAL] Building URLs for campaigns...');
+        
+        // Determine which date range needs real-time API
+        const rangeStart = accrualCustomStart;
+        const rangeEnd = accrualCustomEnd;
+        
+        // ALWAYS fetch realtime from FIXED start date (2026-01-03) for consistency
+        // This ensures the same baseline is used regardless of user-selected range
+        const REALTIME_FIXED_START = '2026-01-03';
+        const needsRealtime = rangeEnd > HISTORICAL_CUTOFF;
+        // Always start from fixed date to ensure consistent baseline calculations
+        const realtimeStart = REALTIME_FIXED_START;
+        
+        console.log('[ACCRUAL] Historical cutoff:', HISTORICAL_CUTOFF);
+        console.log('[ACCRUAL] Range:', rangeStart, 'to', rangeEnd);
+        console.log('[ACCRUAL] Needs realtime:', needsRealtime, 'from:', realtimeStart, '(fixed start)');
+        
+        if (needsRealtime && realtimeStart <= rangeEnd) {
+          // Fetch real-time data from FIXED start date to ensure consistent baseline
+          const rtStartDate = new Date(realtimeStart);
+          const rtEndDate = new Date(rangeEnd);
+          const rtDays = Math.ceil((rtEndDate.getTime() - rtStartDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+          
+          console.log('[ACCRUAL] Fetching real-time for', rtDays, 'days from', realtimeStart);
+          
+          const resps = await Promise.all((campaigns||[]).map((c:any)=> {
+            const url = buildAccrualUrl(c.id, realtimeStart, rtDays);
+            console.log('[ACCRUAL] Fetching:', url);
+            return fetch(url, { cache: 'no-store' });
+          }));        
+          const accs = await Promise.all(resps.map(r=> r.ok ? r.json() : Promise.resolve(null)));
+          const ttAll: any[][] = []; const igAll: any[][] = []; const totalAll: any[][] = [];
+          accs.forEach((acc:any, idx:number)=>{
+            if (!acc) return;
+            console.log('[ACCRUAL] Campaign', campaigns[idx]?.name, 'returned', acc?.series_total?.length || 0, 'days of data');
+            const gid = campaigns[idx]?.id;
+            const gname = campaigns[idx]?.name || gid;
+            groups.push({ id: gid, name: gname, series: acc?.series_total||[], series_tiktok: acc?.series_tiktok||[], series_instagram: acc?.series_instagram||[] });
+            ttAll.push(acc?.series_tiktok||[]); igAll.push(acc?.series_instagram||[]); totalAll.push(acc?.series_total||[]);
+          });
+          let total = sumByDate(totalAll);
+          let total_tiktok = sumByDate(ttAll);
+          let total_instagram = sumByDate(igAll);
+          
+          // IMPORTANT: Filter to only include data within user-selected range
+          // This ensures range Jan 10-16 shows same values regardless of historical range selection
+          const filterByRange = (arr: any[]) => arr.filter((d: any) => {
+            const dateStr = String(d.date).slice(0, 10);
+            return dateStr >= rangeStart && dateStr <= rangeEnd;
+          });
+          
+          // Apply range filter to totals
+          total = filterByRange(total);
+          total_tiktok = filterByRange(total_tiktok);
+          total_instagram = filterByRange(total_instagram);
+          
+          // Also filter group series
+          groups.forEach((g: any) => {
+            if (g.series) g.series = filterByRange(g.series);
+            if (g.series_tiktok) g.series_tiktok = filterByRange(g.series_tiktok);
+            if (g.series_instagram) g.series_instagram = filterByRange(g.series_instagram);
+          });
+          
+          console.log('[ACCRUAL] Real-time total entries (after range filter):', total.length);
+          console.log('[ACCRUAL] Real-time total views (after range filter):', total.reduce((s: number, d: any) => s + (Number(d.views) || 0), 0));
+          json = { interval:'daily', start: effStart, end: effEnd, groups, total, total_tiktok, total_instagram };
+        } else {
+          // All dates are in historical period, no real-time needed
+          console.log('[ACCRUAL] All dates in historical period, no real-time fetch needed');
+          json = { interval:'daily', start: effStart, end: effEnd, groups: [], total: [], total_tiktok: [], total_instagram: [] };
+        }
       } else {
         // Post date: gunakan endpoint groups/series bawaan
         const url = new URL('/api/groups/series', window.location.origin);
@@ -145,10 +239,10 @@ export default function DashboardTotalPage() {
 
       // Hide data before cutoff by zeroing values but keep dates on axis (Accrual only)
       if (mode === 'accrual') {
-        const cutoffDate = useCustomAccrualDates ? accrualCustomStart : accrualCutoff;
+        const cutoffDate = accrualCutoff; // hanya realtime yang di-mask oleh cutoff global
         const zeroBefore = (arr: any[] = []) => arr.map((it:any)=>{
           if (!it || typeof it !== 'object') return it;
-          if (String(it.date) < cutoffDate) {
+          if (String(it.date) <= cutoffDate) {
             const r:any = { ...it };
             if ('views' in r) r.views = 0;
             if ('likes' in r) r.likes = 0;
@@ -211,23 +305,7 @@ export default function DashboardTotalPage() {
         
         if (res.ok && json.data) {
           console.log('[HISTORICAL] Data loaded successfully, count:', json.data.length);
-          console.log('[HISTORICAL] ═══════════════════════════════════════════════');
-          console.log('[HISTORICAL] DETAIL SETIAP RECORD:');
-          json.data.forEach((record: any, index: number) => {
-            console.log(`[HISTORICAL] Record ${index + 1}:`, {
-              id: record.id,
-              periode: `${record.start_date} → ${record.end_date}`,
-              platform: record.platform,
-              views: Number(record.views) || 0,
-              likes: Number(record.likes) || 0,
-              comments: Number(record.comments) || 0,
-              shares: Number(record.shares) || 0,
-              saves: Number(record.saves) || 0,
-              notes: record.notes
-            });
-          });
-          console.log('[HISTORICAL] ═══════════════════════════════════════════════');
-          
+          console.log('[HISTORICAL] Sample entry:', json.data[0]);
           // Sort by start_date to show chronologically
           const sorted = json.data.sort((a: any, b: any) => 
             new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
@@ -245,6 +323,45 @@ export default function DashboardTotalPage() {
     
     loadHistorical();
   }, [showHistorical, platformFilter]);
+  
+  // Load posts data for chart
+  useEffect(() => {
+    const loadPosts = async () => {
+      if (!showPosts) {
+        setPostsData([]);
+        return;
+      }
+      
+      try {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const effStart = mode === 'accrual' ? (useCustomAccrualDates ? accrualCustomStart : (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() - (accrualWindow - 1)); return d.toISOString().slice(0, 10); })()) : start;
+        const effEnd = mode === 'accrual' ? (useCustomAccrualDates ? accrualCustomEnd : todayStr) : end;
+        
+        const url = new URL('/api/posts-series', window.location.origin);
+        url.searchParams.set('start', effStart);
+        url.searchParams.set('end', effEnd);
+        url.searchParams.set('platform', platformFilter);
+        
+        console.log('[POSTS] Fetching from:', url.toString());
+        
+        const res = await fetch(url.toString(), { cache: 'no-store' });
+        const json = await res.json();
+        
+        if (res.ok && json.series) {
+          console.log('[POSTS] Data loaded successfully, count:', json.series.length);
+          setPostsData(json.series);
+        } else {
+          console.error('[POSTS] Failed to load:', json.error);
+          setPostsData([]);
+        }
+      } catch (error) {
+        console.error('[POSTS] Exception:', error);
+        setPostsData([]);
+      }
+    };
+    
+    loadPosts();
+  }, [showPosts, mode, accrualWindow, useCustomAccrualDates, accrualCustomStart, accrualCustomEnd, start, end, platformFilter]);
   
   useEffect(()=>{
     // Fetch active campaign ID
@@ -390,11 +507,14 @@ export default function DashboardTotalPage() {
     
     // Helper: group data by week
     const groupByWeek = (series: any[], startDate: string) => {
-      const start = new Date(startDate);
+      // Parse dates consistently as UTC to avoid timezone issues
+      const start = new Date(startDate + 'T00:00:00Z');
       const weekMap = new Map<number, { views: number; likes: number; comments: number; shares: number; saves: number; startDate: Date; endDate: Date }>();
       
       series.forEach((s: any) => {
-        const date = new Date(s.date);
+        // Parse series date as UTC
+        const dateStr = String(s.date).slice(0, 10);
+        const date = new Date(dateStr + 'T00:00:00Z');
         const daysDiff = Math.floor((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
         const weekNum = Math.floor(daysDiff / 7);
         
@@ -422,18 +542,26 @@ export default function DashboardTotalPage() {
     if (weeklyView && useCustomAccrualDates && mode === 'accrual') {
       console.log('[WEEKLY VIEW] Enabled, processing weekly data...');
       
-      // Combine historical and real-time into one continuous sorted timeline
+      // Combine periods (historical + real-time)
+      // We'll build real-time weeks first, then merge historical periods into the
+      // closest overlapping real-time week to avoid double counting or bucket drift
       let allPeriods: any[] = [];
+      const histPeriods: any[] = [];
+      // Active date range boundaries for filtering (UTC)
+      const rangeStart = new Date(accrualCustomStart + 'T00:00:00Z');
+      const rangeEnd = new Date(accrualCustomEnd + 'T23:59:59Z');
       
-      // Add historical periods if enabled
+      // Historical periods (trim to selected range; they will be added to real-time by aggregation below)
       if (showHistorical && mergedData.historical) {
         console.log('[WEEKLY VIEW] Adding', mergedData.historical.length, 'historical periods');
         mergedData.historical.forEach((h: any) => {
           console.log('[WEEKLY VIEW] Historical entry raw:', JSON.stringify(h));
           
-          // Use week_start/week_end (from mergeHistoricalData)
-          const startDate = new Date(h.week_start || h.start_date);
-          const endDate = new Date(h.week_end || h.end_date);
+          // Use week_start/week_end (from mergeHistoricalData), parse as UTC
+          const startStr = String(h.week_start || h.start_date).slice(0, 10);
+          const endStr = String(h.week_end || h.end_date).slice(0, 10);
+          const startDate = new Date(startStr + 'T00:00:00Z');
+          const endDate = new Date(endStr + 'T23:59:59Z');
           
           // Validate dates
           if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
@@ -461,7 +589,7 @@ export default function DashboardTotalPage() {
             instagram: { views: instagramViews, likes: instagramLikes, comments: instagramComments }
           });
           
-          allPeriods.push({
+          histPeriods.push({
             startDate: startDate,
             endDate: endDate,
             views: totalViews,
@@ -479,188 +607,179 @@ export default function DashboardTotalPage() {
         });
       }
       
-      // Add real-time weekly data
-      const startDate = accrualCustomStart;
-      const weeklyTotal = groupByWeek(mergedData.total || [], startDate);
-      console.log('[WEEKLY VIEW] Adding', weeklyTotal.length, 'real-time weeks');
+      // Historical cutoff for weekly view
+      const HISTORICAL_CUTOFF = '2026-01-02';
+      const REALTIME_START = '2026-01-03';
       
-      // Get platform-specific weekly data for real-time
-      const weeklyTT = (Array.isArray(data.total_tiktok) && data.total_tiktok.length) 
-        ? groupByWeek(data.total_tiktok, startDate) 
-        : [];
-      const weeklyIG = (Array.isArray(data.total_instagram) && data.total_instagram.length) 
-        ? groupByWeek(data.total_instagram, startDate) 
-        : [];
+      console.log('[WEEKLY VIEW] ═══════════════════════════════════════════════════════════');
+      console.log('[WEEKLY VIEW] Range:', accrualCustomStart, 'to', accrualCustomEnd);
+      console.log('[WEEKLY VIEW] Historical cutoff:', HISTORICAL_CUTOFF);
+      console.log('[WEEKLY VIEW] Historical periods loaded:', histPeriods.length);
+      console.log('[WEEKLY VIEW] Real-time daily entries:', (data.total || []).length);
       
-      // Get groups weekly data for real-time
-      const groupsWeekly: any[] = [];
-      if (data.groups && data.groups.length > 0) {
-        data.groups.forEach((group: any) => {
-          let groupSeries = group.series || [];
+      // Step 1: Add historical periods directly (they are already weekly)
+      // Only add periods that overlap with selected range
+      histPeriods.forEach((hp: any) => {
+        const hpStart = hp.startDate.toISOString().slice(0,10);
+        const hpEnd = hp.endDate.toISOString().slice(0,10);
+        
+        // Check if period overlaps with selected range
+        if (hpEnd >= accrualCustomStart && hpStart <= accrualCustomEnd) {
+          console.log(`[WEEKLY VIEW] Adding historical period: ${hpStart} to ${hpEnd} = ${hp.views.toLocaleString()} views`);
+          allPeriods.push({
+            ...hp,
+            is_historical: true
+          });
+        } else {
+          console.log(`[WEEKLY VIEW] Skip historical (out of range): ${hpStart} to ${hpEnd}`);
+        }
+      });
+      
+      // Step 2: Add real-time weekly data (only for dates >= REALTIME_START)
+      // Filter real-time data to only include dates after historical cutoff
+      const realtimeData = (data.total || []).filter((d: any) => String(d.date) >= REALTIME_START);
+      const realtimeTT = (data.total_tiktok || []).filter((d: any) => String(d.date) >= REALTIME_START);
+      const realtimeIG = (data.total_instagram || []).filter((d: any) => String(d.date) >= REALTIME_START);
+      
+      console.log('[WEEKLY VIEW] Real-time entries after cutoff:', realtimeData.length);
+      
+      if (realtimeData.length > 0) {
+        // Group real-time data by week starting from REALTIME_START
+        const weeklyTotal = groupByWeek(realtimeData, REALTIME_START);
+        const weeklyTT = groupByWeek(realtimeTT, REALTIME_START);
+        const weeklyIG = groupByWeek(realtimeIG, REALTIME_START);
+        
+        console.log('[WEEKLY VIEW] Real-time weeks:', weeklyTotal.length);
+        
+        // Build maps for platform data
+        const ttByWeekNum = new Map<number, any>();
+        weeklyTT.forEach((w: any) => ttByWeekNum.set(w.weekNum, w));
+        const igByWeekNum = new Map<number, any>();
+        weeklyIG.forEach((w: any) => igByWeekNum.set(w.weekNum, w));
+        
+        // Get groups weekly data for real-time
+        const groupsWeekly: any[] = [];
+        if (data.groups && data.groups.length > 0) {
+          data.groups.forEach((group: any) => {
+            let groupSeries = (group.series || []).filter((d: any) => String(d.date) >= REALTIME_START);
+            
+            if (platformFilter === 'tiktok' && group.series_tiktok) {
+              groupSeries = (group.series_tiktok || []).filter((d: any) => String(d.date) >= REALTIME_START);
+            } else if (platformFilter === 'instagram' && group.series_instagram) {
+              groupSeries = (group.series_instagram || []).filter((d: any) => String(d.date) >= REALTIME_START);
+            }
+            
+            if (groupSeries.length > 0) {
+              const weeklyGroup = groupByWeek(groupSeries, REALTIME_START);
+              groupsWeekly.push({ name: group.name, weekly: weeklyGroup });
+            }
+          });
+        }
+        
+        // Build maps for groups by weekNum
+        const groupsByWeekNum = new Map<number, any[]>();
+        groupsWeekly.forEach((gw: any) => {
+          gw.weekly.forEach((wk: any) => {
+            const arr = groupsByWeekNum.get(wk.weekNum) || [];
+            arr.push({ name: gw.name, views: wk.views || 0, likes: wk.likes || 0, comments: wk.comments || 0 });
+            groupsByWeekNum.set(wk.weekNum, arr);
+          });
+        });
+        
+        // Add real-time weekly periods
+        weeklyTotal.forEach((w: any) => {
+          const ttData = ttByWeekNum.get(w.weekNum) || { views: 0, likes: 0, comments: 0 };
+          const igData = igByWeekNum.get(w.weekNum) || { views: 0, likes: 0, comments: 0 };
+          const groupsData = groupsByWeekNum.get(w.weekNum) || [];
           
-          // Use platform-specific series if platform filter is active
-          if (platformFilter === 'tiktok' && group.series_tiktok) {
-            groupSeries = group.series_tiktok;
-          } else if (platformFilter === 'instagram' && group.series_instagram) {
-            groupSeries = group.series_instagram;
-          }
+          // Only add if overlaps with selected range
+          const wStart = w.startDate.toISOString().slice(0,10);
+          const wEnd = w.endDate.toISOString().slice(0,10);
           
-          if (groupSeries.length > 0) {
-            const weeklyGroup = groupByWeek(groupSeries, startDate);
-            groupsWeekly.push({
-              name: group.name,
-              weekly: weeklyGroup
+          if (wEnd >= accrualCustomStart && wStart <= accrualCustomEnd) {
+            console.log(`[WEEKLY VIEW] Adding real-time week: ${wStart} to ${wEnd} = ${w.views.toLocaleString()} views`);
+            allPeriods.push({
+              startDate: w.startDate,
+              endDate: w.endDate,
+              views: w.views,
+              likes: w.likes,
+              comments: w.comments,
+              tiktok: ttData.views,
+              tiktok_likes: ttData.likes,
+              tiktok_comments: ttData.comments,
+              instagram: igData.views,
+              instagram_likes: igData.likes,
+              instagram_comments: igData.comments,
+              is_historical: false,
+              groups: groupsData
             });
           }
         });
       }
       
-      console.log('[WEEKLY VIEW] Groups aggregated:', groupsWeekly.length);
-      
-      weeklyTotal.forEach((w: any, idx: number) => {
-        const ttData = weeklyTT[idx] || { views: 0, likes: 0, comments: 0 };
-        const igData = weeklyIG[idx] || { views: 0, likes: 0, comments: 0 };
-        
-        // Collect group data for this week
-        const groupsData: any[] = [];
-        groupsWeekly.forEach((gw: any) => {
-          if (gw.weekly[idx]) {
-            groupsData.push({
-              name: gw.name,
-              views: gw.weekly[idx].views || 0,
-              likes: gw.weekly[idx].likes || 0,
-              comments: gw.weekly[idx].comments || 0
-            });
+      console.log('[WEEKLY VIEW] Total periods before sort:', allPeriods.length);
+
+      // Sort by start date for continuous timeline
+      allPeriods.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+
+      // Aggregate by identical period (start/end): merge any duplicates
+      const agg = new Map<string, any>();
+      for (const p of allPeriods) {
+        const startKey = p.startDate.toISOString().slice(0, 10);
+        const endKey = p.endDate.toISOString().slice(0, 10);
+        const key = `${startKey}_${endKey}`;
+        const cur = agg.get(key) || {
+          startDate: new Date(startKey + 'T00:00:00Z'),
+          endDate: new Date(endKey + 'T00:00:00Z'),
+          views: 0, likes: 0, comments: 0,
+          tiktok: 0, tiktok_likes: 0, tiktok_comments: 0,
+          instagram: 0, instagram_likes: 0, instagram_comments: 0,
+          is_historical: p.is_historical,
+          groups: [] as any[],
+        };
+        cur.views += Number(p.views)||0;
+        cur.likes += Number(p.likes)||0;
+        cur.comments += Number(p.comments)||0;
+        cur.tiktok += Number(p.tiktok)||0;
+        cur.tiktok_likes += Number(p.tiktok_likes)||0;
+        cur.tiktok_comments += Number(p.tiktok_comments)||0;
+        cur.instagram += Number(p.instagram)||0;
+        cur.instagram_likes += Number(p.instagram_likes)||0;
+        cur.instagram_comments += Number(p.instagram_comments)||0;
+        if (Array.isArray(p.groups) && p.groups.length) {
+          const map = new Map<string, any>(cur.groups.map((g:any)=>[g.name, g] as const));
+          for (const g of p.groups) {
+            const ex = map.get(g.name) || { name:g.name, views:0, likes:0, comments:0 };
+            ex.views += Number(g.views)||0; ex.likes += Number(g.likes)||0; ex.comments += Number(g.comments)||0;
+            map.set(g.name, ex);
           }
-        });
-        
-        allPeriods.push({
-          startDate: w.startDate,
-          endDate: w.endDate,
-          views: w.views,
-          likes: w.likes,
-          comments: w.comments,
-          tiktok: ttData.views,
-          tiktok_likes: ttData.likes,
-          tiktok_comments: ttData.comments,
-          instagram: igData.views,
-          instagram_likes: igData.likes,
-          instagram_comments: igData.comments,
-          is_historical: false,
-          groups: groupsData
-        });
-      });
-      
-      // Deduplicate: Remove duplicate periods (same start+end date)
-      // Historical data takes priority over real-time if same period
-      const uniquePeriods = new Map();
-      
-      allPeriods.forEach((p: any) => {
-        const key = `${p.startDate.getTime()}_${p.endDate.getTime()}`;
-        
-        // If period doesn't exist, or current is historical and existing is not, use current
-        if (!uniquePeriods.has(key) || (p.is_historical && !uniquePeriods.get(key).is_historical)) {
-          uniquePeriods.set(key, p);
+          cur.groups = Array.from(map.values());
         }
+        agg.set(key, cur);
+      }
+      allPeriods = Array.from(agg.values());
+      allPeriods.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+      
+      console.log('[WEEKLY VIEW] FINAL periods:', allPeriods.length);
+      allPeriods.forEach((p, idx) => {
+        const marker = p.is_historical ? '📊 HIST' : '🔴 RT';
+        console.log(`  ${marker} [${idx}]: ${p.startDate.toISOString().slice(0,10)} to ${p.endDate.toISOString().slice(0,10)} = ${p.views.toLocaleString()} views`);
       });
       
-      allPeriods = Array.from(uniquePeriods.values());
-      
-      // Filter out completely empty periods (all metrics are 0)
-      allPeriods = allPeriods.filter((p: any) => {
-        // Check if period is completely empty
-        const hasViews = p.views > 0 || p.likes > 0 || p.comments > 0;
-        const hasPlatformData = p.tiktok > 0 || p.instagram > 0;
-        const hasGroupData = p.groups && p.groups.some((g: any) => g.views > 0 || g.likes > 0 || g.comments > 0);
-        
-        const isEmpty = !hasViews && !hasPlatformData && !hasGroupData;
-        
-        if (isEmpty) {
-          console.log('[FILTER] Removing empty period:', {
-            dates: `${p.startDate.toISOString().slice(0,10)} to ${p.endDate.toISOString().slice(0,10)}`,
-            is_historical: p.is_historical,
-            reason: 'No data (all values are 0)'
-          });
-        }
-        
-        return !isEmpty; // Keep only periods with data
-      });
+      // ═══════════════════════════════════════════════════════════════════
+      // Keep empty periods so timeline stays complete and consistent
       
       // Sort by start date for continuous timeline
       allPeriods.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
       
-      console.log('[WEEKLY VIEW] After filtering empty periods, remaining:', allPeriods.length);
+      console.log('[WEEKLY VIEW] FINAL periods after aggregation:', allPeriods.length);
+      allPeriods.forEach((p, idx) => {
+        console.log(`  FINAL[${idx}]: ${p.startDate.toISOString().slice(0,10)} to ${p.endDate.toISOString().slice(0,10)} = ${p.views.toLocaleString()} views`);
+      });
       
       // ═══════════════════════════════════════════════════════════════════
       // AUDIT: Log all periods with detailed breakdown
       // ═══════════════════════════════════════════════════════════════════
-      console.log('\n🔍 [AUDIT] SEMUA PERIODE YANG DITAMPILKAN:');
-      console.log('[AUDIT] ═══════════════════════════════════════════════════════');
-      
-      let totalAllViews = 0;
-      let totalAllLikes = 0;
-      let totalAllComments = 0;
-      let totalTikTokViews = 0;
-      let totalInstagramViews = 0;
-      
-      // Special check for periode 27 Des 2025 - 26 Jan 2026
-      const targetStart = new Date('2025-12-27');
-      const targetEnd = new Date('2026-01-26');
-      let targetPeriodViews = 0;
-      let targetPeriodLikes = 0;
-      let targetPeriodComments = 0;
-      let targetPeriodTikTok = 0;
-      let targetPeriodInstagram = 0;
-      
-      allPeriods.forEach((period: any, index: number) => {
-        const startStr = period.startDate.toISOString().slice(0, 10);
-        const endStr = period.endDate.toISOString().slice(0, 10);
-        const isInTarget = period.startDate >= targetStart && period.endDate <= targetEnd;
-        
-        console.log(`\n[AUDIT] Periode ${index + 1}/${allPeriods.length}:`);
-        console.log(`  📅 Tanggal: ${startStr} → ${endStr}`);
-        console.log(`  🏷️  Tipe: ${period.is_historical ? '📊 HISTORICAL' : '🔴 REAL-TIME'}`);
-        console.log(`  👁️  Views: ${period.views.toLocaleString('id-ID')}`);
-        console.log(`  ❤️  Likes: ${period.likes.toLocaleString('id-ID')}`);
-        console.log(`  💬 Comments: ${period.comments.toLocaleString('id-ID')}`);
-        console.log(`  🎵 TikTok: ${period.tiktok.toLocaleString('id-ID')}`);
-        console.log(`  📷 Instagram: ${period.instagram.toLocaleString('id-ID')}`);
-        
-        if (isInTarget) {
-          console.log(`  ⚠️  MASUK PERIODE TARGET (27 Des - 26 Jan)`);
-          targetPeriodViews += period.views;
-          targetPeriodLikes += period.likes;
-          targetPeriodComments += period.comments;
-          targetPeriodTikTok += period.tiktok;
-          targetPeriodInstagram += period.instagram;
-        }
-        
-        totalAllViews += period.views;
-        totalAllLikes += period.likes;
-        totalAllComments += period.comments;
-        totalTikTokViews += period.tiktok;
-        totalInstagramViews += period.instagram;
-      });
-      
-      console.log('\n[AUDIT] ═══════════════════════════════════════════════════════');
-      console.log('[AUDIT] 📊 GRAND TOTAL DARI CHART:');
-      console.log(`[AUDIT]   Total Views: ${totalAllViews.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Total Likes: ${totalAllLikes.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Total Comments: ${totalAllComments.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Total TikTok: ${totalTikTokViews.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Total Instagram: ${totalInstagramViews.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   TikTok + Instagram = ${(totalTikTokViews + totalInstagramViews).toLocaleString('id-ID')}`);
-      
-      console.log('\n[AUDIT] 🎯 PERIODE TARGET (27 Des 2025 - 26 Jan 2026):');
-      console.log(`[AUDIT]   Views dalam periode: ${targetPeriodViews.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Likes dalam periode: ${targetPeriodLikes.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Comments dalam periode: ${targetPeriodComments.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   TikTok dalam periode: ${targetPeriodTikTok.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   Instagram dalam periode: ${targetPeriodInstagram.toLocaleString('id-ID')}`);
-      console.log(`[AUDIT]   TikTok + Instagram = ${(targetPeriodTikTok + targetPeriodInstagram).toLocaleString('id-ID')} ⚠️`);
-      console.log(`[AUDIT]   ⚠️  EXPECTED (dari hitungan manual): 101,463,460`);
-      console.log(`[AUDIT]   ⚠️  SELISIH: ${(101463460 - (targetPeriodTikTok + targetPeriodInstagram)).toLocaleString('id-ID')}`);
-      console.log('[AUDIT] ═══════════════════════════════════════════════════════\n');
       console.log('');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('[AUDIT] CHART PERIODS BREAKDOWN');
@@ -709,71 +828,9 @@ export default function DashboardTotalPage() {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('');
       
-      // ═══════════════════════════════════════════════════════════════════
-      // SPECIAL AUDIT: Check specific period 27 Des 2025 - 26 Jan 2026
-      // ═══════════════════════════════════════════════════════════════════
-      const targetStart = new Date('2025-12-27');
-      const targetEnd = new Date('2026-01-26');
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIT] SPECIFIC PERIOD: 27 Desember 2025 - 26 Januari 2026');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
-      const periodsInRange = allPeriods.filter((p: any) => {
-        // Check if period overlaps with target range
-        return p.startDate >= targetStart && p.endDate <= targetEnd;
-      });
-      
-      console.log('[AUDIT] Found', periodsInRange.length, 'periods in target range');
-      
-      let targetTotal = 0;
-      let targetTikTok = 0;
-      let targetInstagram = 0;
-      
-      const targetAudit = periodsInRange.map((p: any, idx: number) => {
-        const views = Number(p.views) || 0;
-        const tiktok = Number(p.tiktok) || 0;
-        const instagram = Number(p.instagram) || 0;
-        
-        targetTotal += views;
-        targetTikTok += tiktok;
-        targetInstagram += instagram;
-        
-        return {
-          '#': idx + 1,
-          'Start': p.startDate.toISOString().slice(0, 10),
-          'End': p.endDate.toISOString().slice(0, 10),
-          'Type': p.is_historical ? '📊 Historical' : '🔴 Real-time',
-          'TikTok': tiktok.toLocaleString('id-ID'),
-          'Instagram': instagram.toLocaleString('id-ID'),
-          'TOTAL': views.toLocaleString('id-ID')
-        };
-      });
-      
-      if (targetAudit.length > 0) {
-        console.table(targetAudit);
-        console.log('');
-        console.log('[AUDIT] RESULT FOR 27 Des 2025 - 26 Jan 2026:');
-        console.log('  TikTok views:', targetTikTok.toLocaleString('id-ID'));
-        console.log('  Instagram views:', targetInstagram.toLocaleString('id-ID'));
-        console.log('  ═══════════════════════════════════════════════════');
-        console.log('  TOTAL (TikTok + Instagram):', targetTotal.toLocaleString('id-ID'));
-        console.log('  ═══════════════════════════════════════════════════');
-        console.log('');
-        console.log('  ⚠️  Manual calculation expected: 101,463,460');
-        console.log('  📊 Website showing:', targetTotal.toLocaleString('id-ID'));
-        console.log('  📉 Difference:', (101463460 - targetTotal).toLocaleString('id-ID'));
-      } else {
-        console.log('[AUDIT] ⚠️  NO PERIODS FOUND in target range!');
-        console.log('[AUDIT] This might be the issue. Check date filters.');
-      }
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('');
-      
-      // Generate labels from sorted periods
+      // Generate labels from sorted periods (shorter format to avoid overlap)
       labels = allPeriods.map((p: any) => {
-        const start = format(p.startDate, 'd MMM', { locale: localeID });
+        const start = format(p.startDate, 'd', { locale: localeID });
         const end = format(p.endDate, 'd MMM', { locale: localeID });
         return `${start}-${end}`;
       });
@@ -803,7 +860,8 @@ export default function DashboardTotalPage() {
         borderColor: palette[0], 
         backgroundColor: palette[0] + '33', 
         fill: true, 
-        tension: 0.35
+        tension: 0.35,
+        yAxisID: 'y'
       });
       
       // Platform breakdown (only if 'all' is selected)
@@ -822,7 +880,8 @@ export default function DashboardTotalPage() {
           borderColor: '#38bdf8', 
           backgroundColor: 'rgba(56,189,248,0.15)', 
           fill: false, 
-          tension: 0.35
+          tension: 0.35,
+          yAxisID: 'y'
         });
         
         // Instagram breakdown
@@ -839,7 +898,8 @@ export default function DashboardTotalPage() {
           borderColor: '#f43f5e', 
           backgroundColor: 'rgba(244,63,94,0.15)', 
           fill: false, 
-          tension: 0.35
+          tension: 0.35,
+          yAxisID: 'y'
         });
       }
       
@@ -862,8 +922,46 @@ export default function DashboardTotalPage() {
             borderColor: palette[(idx + 3) % palette.length],
             backgroundColor: 'transparent',
             fill: false,
-            tension: 0.35
+            tension: 0.35,
+            yAxisID: 'y'
           });
+        });
+      }
+      
+      // Posts line (if showPosts is enabled)
+      if (showPosts && postsData.length > 0) {
+        // Group posts by week matching allPeriods
+        const postsMap = new Map<string, number>();
+        postsData.forEach((p: any) => {
+          postsMap.set(p.date, p.posts || 0);
+        });
+        
+        const postsVals = allPeriods.map((period: any) => {
+          // Sum posts within this period's date range
+          const startDate = period.startDate;
+          const endDate = period.endDate;
+          let sum = 0;
+          
+          for (const [dateStr, count] of postsMap.entries()) {
+            const d = new Date(dateStr + 'T00:00:00Z');
+            if (d >= startDate && d <= endDate) {
+              sum += count;
+            }
+          }
+          return sum;
+        });
+        
+        console.log('[WEEKLY VIEW] Posts values:', postsVals);
+        
+        datasets.push({
+          label: 'Posts',
+          data: postsVals,
+          borderColor: '#a855f7', // Purple color for Posts
+          backgroundColor: 'rgba(168, 85, 247, 0.15)',
+          fill: false,
+          tension: 0.35,
+          yAxisID: 'y1', // Use secondary Y axis for Posts (different scale)
+          borderDash: [5, 5] // Dashed line to differentiate
         });
       }
       
@@ -893,18 +991,19 @@ export default function DashboardTotalPage() {
       borderColor: palette[0], 
       backgroundColor: palette[0]+'33', 
       fill: true, 
-      tension: 0.35 
+      tension: 0.35,
+      yAxisID: 'y'
     });
     
     // Platform breakdown if available (only when 'all' selected)
     if (platformFilter === 'all') {
       if (Array.isArray(data.total_tiktok) && data.total_tiktok.length) {
         const ttVals = data.total_tiktok.map((s:any)=> metric==='likes'? s.likes : metric==='comments'? s.comments : s.views);
-        datasets.push({ label:'TikTok', data: ttVals, borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.15)', fill: false, tension: 0.35 });
+        datasets.push({ label:'TikTok', data: ttVals, borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.15)', fill: false, tension: 0.35, yAxisID: 'y' });
       }
       if (Array.isArray(data.total_instagram) && data.total_instagram.length) {
         const igVals = data.total_instagram.map((s:any)=> metric==='likes'? s.likes : metric==='comments'? s.comments : s.views);
-        datasets.push({ label:'Instagram', data: igVals, borderColor: '#f43f5e', backgroundColor: 'rgba(244,63,94,0.15)', fill: false, tension: 0.35 });
+        datasets.push({ label:'Instagram', data: igVals, borderColor: '#f43f5e', backgroundColor: 'rgba(244,63,94,0.15)', fill: false, tension: 0.35, yAxisID: 'y' });
       }
     }
     
@@ -926,85 +1025,76 @@ export default function DashboardTotalPage() {
         return metric==='likes'? it.likes : metric==='comments'? it.comments : it.views; 
       });
       const color = palette[(i+1)%palette.length];
-      datasets.push({ label: g.name, data: vals, borderColor: color, backgroundColor: color+'33', fill: false, tension:0.35 });
+      datasets.push({ label: g.name, data: vals, borderColor: color, backgroundColor: color+'33', fill: false, tension:0.35, yAxisID: 'y' });
     }
+    
+    // Posts line (if showPosts is enabled) - Daily view
+    if (showPosts && postsData.length > 0) {
+      const postsMap = new Map<string, number>();
+      postsData.forEach((p: any) => {
+        postsMap.set(p.date, p.posts || 0);
+      });
+      
+      const postsVals = totalSeries.map((t: any) => {
+        return postsMap.get(String(t.date)) || 0;
+      });
+      
+      datasets.push({
+        label: 'Posts',
+        data: postsVals,
+        borderColor: '#a855f7', // Purple
+        backgroundColor: 'rgba(168, 85, 247, 0.15)',
+        fill: false,
+        tension: 0.35,
+        yAxisID: 'y1', // Secondary Y axis
+        borderDash: [5, 5]
+      });
+    }
+    
     return { labels, datasets };
-  }, [data, metric, interval, weeklyView, useCustomAccrualDates, mode, accrualCustomStart, platformFilter]);
+  }, [data, metric, interval, weeklyView, useCustomAccrualDates, mode, accrualCustomStart, platformFilter, showPosts, postsData]);
 
   // Crosshair + floating label, like Groups
   const chartRef = useRef<any>(null);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   
-  // Calculate grand totals including historical data
+  // Calculate grand totals strictly from current masked server totals
   const grandTotals = useMemo(() => {
     if (!data) return { views: 0, likes: 0, comments: 0 };
-    
-    // Start with real-time totals
-    let totals = {
-      views: Number(data.totals?.views || 0),
-      likes: Number(data.totals?.likes || 0),
-      comments: Number(data.totals?.comments || 0)
-    };
-    
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('[AUDIT] GRAND TOTALS CALCULATION');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('[AUDIT] Real-time totals from database:', totals);
-    console.log('[AUDIT] Real-time data.totals object:', data.totals);
-    
-    // Add historical data if enabled and available
-    if (showHistorical && historicalData.length > 0) {
-      console.log('[AUDIT] Historical data enabled, processing', historicalData.length, 'records');
-      
-      let historicalSum = { views: 0, likes: 0, comments: 0 };
-      const auditLog: any[] = [];
-      
-      historicalData.forEach((h: any, idx: number) => {
-        const views = Number(h.views) || 0;
-        const likes = Number(h.likes) || 0;
-        const comments = Number(h.comments) || 0;
-        
-        historicalSum.views += views;
-        historicalSum.likes += likes;
-        historicalSum.comments += comments;
-        
-        auditLog.push({
-          index: idx + 1,
-          period: `${h.start_date} → ${h.end_date}`,
-          platform: h.platform,
-          views: views.toLocaleString('id-ID'),
-          runningTotal: historicalSum.views.toLocaleString('id-ID')
-        });
-      });
-      
-      console.log('[AUDIT] Historical records breakdown:');
-      console.table(auditLog);
-      
-      console.log('[AUDIT] Historical sum:', {
-        views: historicalSum.views.toLocaleString('id-ID'),
-        likes: historicalSum.likes.toLocaleString('id-ID'),
-        comments: historicalSum.comments.toLocaleString('id-ID')
-      });
-      
-      const beforeAdd = { ...totals };
-      totals.views += historicalSum.views;
-      totals.likes += historicalSum.likes;
-      totals.comments += historicalSum.comments;
-      
-      console.log('[AUDIT] FINAL CALCULATION:');
-      console.log('  Real-time views:', beforeAdd.views.toLocaleString('id-ID'));
-      console.log('  Historical views:', historicalSum.views.toLocaleString('id-ID'));
-      console.log('  ═════════════════════════════════');
-      console.log('  TOTAL views:', totals.views.toLocaleString('id-ID'));
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    // Base = sum from currently selected platform series so header matches chart
+    const sumArr = (arr:any[] = []) => arr.reduce((a:any,s:any)=>({
+      views: (a.views||0) + Number(s.views||0),
+      likes: (a.likes||0) + Number(s.likes||0),
+      comments: (a.comments||0) + Number(s.comments||0)
+    }), { views:0, likes:0, comments:0 });
+    let base = { views:0, likes:0, comments:0 } as any;
+    if (platformFilter === 'tiktok' && Array.isArray(data.total_tiktok)) {
+      base = sumArr(data.total_tiktok);
+    } else if (platformFilter === 'instagram' && Array.isArray(data.total_instagram)) {
+      base = sumArr(data.total_instagram);
     } else {
-      console.log('[AUDIT] Historical data NOT included');
-      console.log('  Reason: showHistorical =', showHistorical, ', count =', historicalData.length);
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      base = sumArr(data.total || []);
     }
-    
-    return totals;
-  }, [data, showHistorical, historicalData]);
+    // Tambahkan historical hanya pada mode accrual + weekly + custom dates
+    if (weeklyView && mode==='accrual' && useCustomAccrualDates && showHistorical && historicalData.length) {
+      // Use UTC dates for consistency
+      const rs = new Date(accrualCustomStart + 'T00:00:00Z');
+      const re = new Date(accrualCustomEnd + 'T23:59:59Z');
+      let hv=0, hl=0, hc=0;
+      for (const h of historicalData) {
+        const hs = new Date(String(h.start_date).slice(0,10) + 'T00:00:00Z');
+        const he = new Date(String(h.end_date).slice(0,10) + 'T23:59:59Z');
+        // Overlap check
+        if (!(he < rs || hs > re)) {
+          hv += Number(h.views)||0;
+          hl += Number(h.likes)||0;
+          hc += Number(h.comments)||0;
+        }
+      }
+      return { views: base.views + hv, likes: base.likes + hl, comments: base.comments + hc };
+    }
+    return base;
+  }, [data, weeklyView, mode, useCustomAccrualDates, showHistorical, historicalData, accrualCustomStart, accrualCustomEnd]);
   
   const crosshairPlugin = useMemo(()=>({
     id: 'crosshairPlugin',
@@ -1017,8 +1107,45 @@ export default function DashboardTotalPage() {
       if (idx==null || x==null) return;
       ctx.save(); ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(x,top); ctx.lineTo(x,bottom); ctx.stroke(); ctx.restore();
       try{
-        const label = String(chart.data.labels[idx]); const totalDs = chart.data.datasets?.[0]; const v = Array.isArray(totalDs?.data)? Number(totalDs.data[idx]||0):0; const txt=`${new Intl.NumberFormat('id-ID').format(Math.round(v))}  ${label}`;
-        ctx.save(); ctx.font='12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; const padX=8,padY=6; const tw=ctx.measureText(txt).width; const boxW=tw+padX*2, boxH=22; const bx=Math.min(right-boxW-6, Math.max(left+6, x+8)); const by=top+8; const r=6; ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.moveTo(bx+r,by); ctx.lineTo(bx+boxW-r,by); ctx.quadraticCurveTo(bx+boxW,by,bx+boxW,by+r); ctx.lineTo(bx+boxW,by+boxH-r); ctx.quadraticCurveTo(bx+boxW,by+boxH,bx+boxW-r,by+boxH); ctx.lineTo(bx+r,by+boxH); ctx.quadraticCurveTo(bx,by+boxH,bx,by+boxH-r); ctx.lineTo(bx,by+r); ctx.quadraticCurveTo(bx,by,bx+r,by); ctx.closePath(); ctx.fill(); ctx.fillStyle='#fff'; ctx.fillText(txt,bx+padX,by+boxH-padY); ctx.restore();
+        const label = String(chart.data.labels[idx]); 
+        const totalDs = chart.data.datasets?.[0]; 
+        const v = Array.isArray(totalDs?.data)? Number(totalDs.data[idx]||0):0; 
+        const numTxt = new Intl.NumberFormat('id-ID').format(Math.round(v));
+        const dateTxt = label;
+        
+        ctx.save(); 
+        ctx.font='bold 13px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; 
+        const padX=10, padY=8; 
+        const numW = ctx.measureText(numTxt).width;
+        ctx.font='11px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+        const dateW = ctx.measureText(dateTxt).width;
+        const boxW = Math.max(numW, dateW) + padX*2;
+        const boxH = 38;
+        // Fixed position at top-left corner of chart area
+        const bx = left + 10; 
+        const by = top + 10; 
+        const r=6; 
+        
+        // Background box
+        ctx.fillStyle='rgba(0,0,0,0.75)'; 
+        ctx.beginPath(); 
+        ctx.moveTo(bx+r,by); ctx.lineTo(bx+boxW-r,by); ctx.quadraticCurveTo(bx+boxW,by,bx+boxW,by+r); 
+        ctx.lineTo(bx+boxW,by+boxH-r); ctx.quadraticCurveTo(bx+boxW,by+boxH,bx+boxW-r,by+boxH); 
+        ctx.lineTo(bx+r,by+boxH); ctx.quadraticCurveTo(bx,by+boxH,bx,by+boxH-r); 
+        ctx.lineTo(bx,by+r); ctx.quadraticCurveTo(bx,by,bx+r,by); 
+        ctx.closePath(); ctx.fill(); 
+        
+        // Number (big, white)
+        ctx.font='bold 13px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+        ctx.fillStyle='#fff'; 
+        ctx.fillText(numTxt, bx+padX, by+18);
+        
+        // Date label (smaller, dimmer)
+        ctx.font='11px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+        ctx.fillStyle='rgba(255,255,255,0.6)'; 
+        ctx.fillText(dateTxt, bx+padX, by+32);
+        
+        ctx.restore();
       } catch {}
     }
   }), []);
@@ -1104,7 +1231,7 @@ export default function DashboardTotalPage() {
       </div>
       
       {/* Platform Filter */}
-      <div className="mb-3 flex items-center gap-2 text-xs">
+      <div className="mb-3 flex items-center gap-2 text-xs flex-wrap">
         <span className="text-white/60">Platform:</span>
         <button className={`px-2 py-1 rounded ${platformFilter==='all'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('all')}>Semua</button>
         <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='tiktok'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('tiktok')}>
@@ -1112,6 +1239,16 @@ export default function DashboardTotalPage() {
         </button>
         <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='instagram'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('instagram')}>
           <span className="text-[#f43f5e]">●</span> Instagram
+        </button>
+        
+        <span className="text-white/30 mx-2">|</span>
+        
+        {/* Posts toggle */}
+        <button 
+          className={`px-2 py-1 rounded flex items-center gap-1 ${showPosts?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} 
+          onClick={()=>setShowPosts(!showPosts)}
+        >
+          <span className="text-[#a855f7]">●</span> Posts
         </button>
       </div>
 
@@ -1140,10 +1277,36 @@ export default function DashboardTotalPage() {
             },
             scales:{
               x:{
-                ticks:{ color:'rgba(255,255,255,0.6)', autoSkip: interval !== 'daily', maxRotation:0, minRotation:0 },
+                ticks:{ 
+                  color:'rgba(255,255,255,0.6)', 
+                  autoSkip: false,
+                  maxRotation: 90, 
+                  minRotation: 45,
+                  font: { size: 9 }
+                },
                 grid:{ color:'rgba(255,255,255,0.06)'}
               },
-              y:{ ticks:{ color:'rgba(255,255,255,0.6)'}, grid:{ color:'rgba(255,255,255,0.06)'} }
+              y:{ 
+                type: 'linear',
+                display: true,
+                position: 'left',
+                ticks:{ color:'rgba(255,255,255,0.6)'}, 
+                grid:{ color:'rgba(255,255,255,0.06)'},
+                title: {
+                  display: false
+                }
+              },
+              y1: {
+                type: 'linear',
+                display: showPosts,
+                position: 'right',
+                ticks:{ color:'#a855f7', font: { size: 10 } },
+                grid:{ drawOnChartArea: false },
+                title: {
+                  display: false
+                },
+                beginAtZero: true
+              }
             },
             onHover: (_e:any, el:any[])=> setActiveIndex(el && el.length>0 ? (el[0].index ?? null) : null)
           }} onMouseLeave={()=> setActiveIndex(null)} />
@@ -1153,7 +1316,7 @@ export default function DashboardTotalPage() {
       {/* Top 5 Video FYP Section (aggregate across all groups when campaignId undefined) */}
       <div className="mt-8">
         <TopViralDashboard 
-          days={accrualWindow === 7 ? 7 : 28} 
+          days={30} 
           limit={5} 
         />
       </div>

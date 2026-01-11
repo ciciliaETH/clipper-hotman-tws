@@ -151,7 +151,7 @@ export async function GET(request: NextRequest) {
         if (hasCore) return v;
 
         // Build video URL and call TikWM to enrich
-        const vid = v.aweme_id || v.video_id;
+        const vid = v.video_id;
         if (!vid) return v;
         const videoUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}/video/${encodeURIComponent(vid)}`;
         try {

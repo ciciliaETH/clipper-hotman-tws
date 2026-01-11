@@ -31,7 +31,7 @@ export default function AnalyticsPage() {
   const [data, setData] = useState<any|null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2025-12-17';
+  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2026-01-02';
   // Toggle sumber data agar konsisten dengan Dashboard/Groups
   const [showTotal, setShowTotal] = useState(true);
   const [showTikTok, setShowTikTok] = useState(true);

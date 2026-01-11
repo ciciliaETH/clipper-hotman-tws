@@ -31,9 +31,9 @@ export async function GET(req: Request, ctx: any) {
     const allowed = await canView(id); if (!allowed) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     const admin = adminClient();
     const url = new URL(req.url);
-    const day = String(url.searchParams.get('date') || '2025-12-17');
+    const day = String(url.searchParams.get('date') || '2026-01-02');
     const format = String(url.searchParams.get('format') || 'json').toLowerCase();
-    const cutoff = String(process.env.ACCRUAL_CUTOFF_DATE || '2025-12-17');
+    const cutoff = String(process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
     const effDay = day < cutoff ? cutoff : day;
 
     // Build campaign users (TikTok)

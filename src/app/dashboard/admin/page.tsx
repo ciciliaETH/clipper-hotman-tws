@@ -399,34 +399,32 @@ export default function AdminPage() {
   });
   const [autoTikTokMode, setAutoTikTokMode] = useState(false); // AUTO-CONTINUE MODE
 
-  // Accrual backfill state
-  const [runningAccrual, setRunningAccrual] = useState(false);
-  const [accrualResult, setAccrualResult] = useState<any>(null);
+  // Backfill taken_at state
+  const [runningTakenAt, setRunningTakenAt] = useState(false);
+  const [takenAtResult, setTakenAtResult] = useState<any>(null);
+  const [takenAtPlatform, setTakenAtPlatform] = useState<'instagram' | 'tiktok' | 'all'>('instagram');
   
-  const runAccrualBackfill = async () => {
-    if (!confirm('Backfill accrual data untuk 28 hari terakhir? Proses ~2 menit.')) return;
+  const runTakenAtBackfill = async () => {
+    if (!confirm(`Backfill taken_at untuk ${takenAtPlatform === 'all' ? 'Instagram & TikTok' : takenAtPlatform}?\nProses bisa memakan waktu 5-10 menit.`)) return;
     
-    setRunningAccrual(true);
-    setAccrualResult(null);
+    setRunningTakenAt(true);
+    setTakenAtResult(null);
     
     try {
-      const res = await fetch('/api/backfill/accrual', {
+      const res = await fetch(`/api/backfill/taken-at?platform=${takenAtPlatform}&limit=200`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          days: 28,
-          campaign_id: activeCampaignId || null
-        })
+        body: JSON.stringify({})
       });
       const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Gagal backfill accrual');
+      if (!res.ok) throw new Error(j?.error || 'Gagal backfill taken_at');
       
-      setAccrualResult(j);
-      alert(`✅ Accrual backfill selesai!\n\nInserted: ${j.inserted || 0} snapshots\nEmployees: ${j.employees || 0}\nRange: ${j.range?.start} to ${j.range?.end}`);
+      setTakenAtResult(j);
+      alert(`✅ Backfill taken_at selesai!\n\nPlatform: ${j.platform || takenAtPlatform}\nUpdated: ${j.updated || 0}\nFailed: ${j.failed || 0}`);
     } catch (e: any) {
-      alert('Error: ' + (e?.message || 'Gagal backfill accrual'));
+      alert('Error: ' + (e?.message || 'Gagal backfill taken_at'));
     } finally {
-      setRunningAccrual(false);
+      setRunningTakenAt(false);
     }
   };
 
@@ -537,14 +535,24 @@ export default function AdminPage() {
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-semibold tracking-tight bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">Manajemen Karyawan</h1>
         <div className="flex items-center gap-3">
-          <button 
-            onClick={runAccrualBackfill}
-            disabled={refreshingTikTok || refreshingIG}
-            className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-purple-600 to-purple-700 text-white shadow-lg hover:shadow-xl transition-all border border-white/10 disabled:opacity-50"
-            title="Backfill campaign series accrual data"
+          {/* Platform selector for taken_at backfill */}
+          <select
+            value={takenAtPlatform}
+            onChange={(e) => setTakenAtPlatform(e.target.value as 'instagram' | 'tiktok' | 'all')}
+            className="rounded-lg px-3 py-2 bg-gray-800 text-white border border-white/20 text-sm"
           >
-            <span className="text-lg">💰</span>
-            <span className="font-medium">Backfill Accrual</span>
+            <option value="instagram">Instagram</option>
+            <option value="tiktok">TikTok</option>
+            <option value="all">Semua</option>
+          </select>
+          <button 
+            onClick={runTakenAtBackfill}
+            disabled={runningTakenAt || refreshingTikTok || refreshingIG}
+            className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-purple-600 to-purple-700 text-white shadow-lg hover:shadow-xl transition-all border border-white/10 disabled:opacity-50"
+            title="Backfill taken_at (tanggal upload video) untuk posts yang belum ada"
+          >
+            <span className="text-lg">📅</span>
+            <span className="font-medium">{runningTakenAt ? 'Processing...' : 'Backfill Taken At'}</span>
           </button>
           {/* Manual TikTok refresh hidden per request */}
           <button 

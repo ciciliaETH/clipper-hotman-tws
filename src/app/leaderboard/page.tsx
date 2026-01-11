@@ -26,7 +26,7 @@ export default function LeaderboardPage() {
   const [weeklyEnd, setWeeklyEnd] = useState<string>('')
   const [campaignId, setCampaignId] = useState<string>('')
   const [users, setUsers] = useState<any[]>([])
-  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2025-12-20';
+  const accrualCutoff = (process.env.NEXT_PUBLIC_ACCRUAL_CUTOFF_DATE as string) || '2026-01-02';
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
   const [selectedRow, setSelectedRow] = useState<Row | null>(null)
@@ -36,8 +36,8 @@ export default function LeaderboardPage() {
   
   // Custom date states
   const [useCustomDates, setUseCustomDates] = useState(false);
-  const [customStart, setCustomStart] = useState('2025-12-20');
-  const [customEnd, setCustomEnd] = useState('2025-12-26');
+  const [customStart, setCustomStart] = useState('2026-01-02');
+  const [customEnd, setCustomEnd] = useState('2026-01-02');
 
   const loadEmployees = async (m: string, iv: 'days7'|'days28') => {
     setLoading(true); setError(null);

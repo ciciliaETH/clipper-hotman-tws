@@ -21,14 +21,41 @@ async function ensureAdmin() {
   return data?.role === 'admin' || data?.role === 'super_admin';
 }
 
-async function rapidJson(url: string, host: string, timeoutMs = 15000) {
+function getRandomKey() {
   const keys = (process.env.RAPID_API_KEYS || process.env.RAPIDAPI_KEYS || process.env.RAPID_KEY_BACKFILL || process.env.RAPIDAPI_KEY || '').split(',').map(s=>s.trim()).filter(Boolean);
   if (!keys.length) throw new Error('No RapidAPI key');
-  const key = keys[Math.floor(Math.random()*keys.length)];
+  return keys[Math.floor(Math.random()*keys.length)];
+}
+
+async function rapidJson(url: string, host: string, timeoutMs = 15000) {
+  const key = getRandomKey();
   const controller = new AbortController();
   const id = setTimeout(()=>controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { headers: { 'x-rapidapi-key': key, 'x-rapidapi-host': host, 'accept': 'application/json' }, signal: controller.signal });
+    const txt = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${txt.slice(0,200)}`);
+    try { return JSON.parse(txt); } catch { return txt; }
+  } finally { clearTimeout(id); }
+}
+
+// POST request for instagram-media-api.p.rapidapi.com
+async function rapidPostJson(url: string, host: string, body: object, timeoutMs = 15000) {
+  const key = getRandomKey();
+  const controller = new AbortController();
+  const id = setTimeout(()=>controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { 
+      method: 'POST',
+      headers: { 
+        'x-rapidapi-key': key, 
+        'x-rapidapi-host': host, 
+        'Content-Type': 'application/json',
+        'accept': 'application/json' 
+      }, 
+      body: JSON.stringify(body),
+      signal: controller.signal 
+    });
     const txt = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${txt.slice(0,200)}`);
     try { return JSON.parse(txt); } catch { return txt; }
@@ -41,7 +68,7 @@ export async function POST(req: Request) {
     if (!ok) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     const supa = adminClient();
     const body = await req.json().catch(()=>({}));
-    const maxAccountsPerRequest = 10; // Process max 10 accounts to prevent timeout
+    const maxAccountsPerRequest = body?.limit ? Math.min(body.limit, 5) : 5; // Process max 5 accounts to prevent timeout
     const doFetch = body?.fetch === true;
     const force = body?.force === true;
     const debug = body?.debug === true;
@@ -100,6 +127,7 @@ export async function POST(req: Request) {
 
     const host = process.env.RAPIDAPI_INSTAGRAM_HOST || 'instagram120.p.rapidapi.com';
     const scraper = process.env.RAPIDAPI_IG_SCRAPER_HOST || 'instagram-scraper-api11.p.rapidapi.com';
+    const mediaApi = 'instagram-media-api.p.rapidapi.com'; // Primary API for user ID resolution
 
     const results: any[] = [];
     const resolved: Array<{username:string; user_id:string}> = [];
@@ -116,90 +144,52 @@ export async function POST(req: Request) {
       
       // Enhanced multi-provider resolution with retry logic
       const providers = [
-        // Provider 1: Scraper link endpoint (most reliable)
+        // Provider 1: instagram-media-api.p.rapidapi.com (PRIMARY - as specified by user)
+        {
+          name: 'media_api',
+          fn: async () => {
+            try {
+              const j = await rapidPostJson(
+                `https://${mediaApi}/user/id`,
+                mediaApi,
+                { username: u, proxy: '' },
+                12000
+              );
+              if (debug) console.log(`[Resolve IG] ${u} media_api response:`, JSON.stringify(j).slice(0, 500));
+              // Response format: { id: "123456789", username: "dailysuli" }
+              return j?.id || j?.user_id || j?.pk;
+            } catch (err: any) {
+              if (debug) console.log(`[Resolve IG] ${u} media_api error:`, err?.message);
+              throw err;
+            }
+          }
+        },
+        // Provider 2: Scraper link endpoint (fallback)
         {
           name: 'scraper_link',
           fn: async () => {
-            const j = await rapidJson(`https://${scraper}/get_instagram_user_id?link=${encodeURIComponent('https://www.instagram.com/'+u)}`, scraper, 15000);
-            return j?.user_id || j?.id || j?.data?.user_id || j?.data?.id;
+            try {
+              const j = await rapidJson(`https://${scraper}/get_instagram_user_id?link=${encodeURIComponent('https://www.instagram.com/'+u)}`, scraper, 10000);
+              if (debug) console.log(`[Resolve IG] ${u} scraper_link response:`, JSON.stringify(j).slice(0, 500));
+              return j?.user_id || j?.id || j?.data?.user_id || j?.data?.id;
+            } catch (err: any) {
+              if (debug) console.log(`[Resolve IG] ${u} scraper_link error:`, err?.message);
+              throw err;
+            }
           }
         },
-        // Provider 2: Host user endpoints
-        {
-          name: 'host_user',
-          fn: async () => {
-            const endpoints = [
-              `https://${host}/api/instagram/user?username=${encodeURIComponent(u)}`,
-              `https://${host}/api/instagram/userinfo?username=${encodeURIComponent(u)}`,
-              `https://${host}/api/instagram/username?username=${encodeURIComponent(u)}`,
-            ];
-            for (const url of endpoints) {
-              try {
-                const ij = await rapidJson(url, host, 15000);
-                const cand = ij?.result?.user || ij?.user || ij?.result || {};
-                const pk = cand?.pk || cand?.id || cand?.pk_id || ij?.result?.pk || ij?.result?.id;
-                if (pk) return String(pk);
-              } catch {}
-            }
-            return undefined;
-          }
-        },
-        // Provider 3: Scraper alternative endpoints
-        {
-          name: 'scraper_alts',
-          fn: async () => {
-            const alts = [
-              `https://${scraper}/get_user_id?user_name=${encodeURIComponent(u)}`,
-              `https://${scraper}/get_user_id_from_username?user_name=${encodeURIComponent(u)}`,
-              `https://${scraper}/get_instagram_user_id_from_username?username=${encodeURIComponent(u)}`,
-              `https://${scraper}/get_instagram_profile_info?username=${encodeURIComponent(u)}`,
-            ];
-            for (const url of alts) {
-              try {
-                const j = await rapidJson(url, scraper, 15000);
-                const id = j?.user_id || j?.id || j?.data?.user_id || j?.data?.id || j?.data?.user?.id || j?.user?.id;
-                if (id) return String(id);
-              } catch {}
-            }
-            return undefined;
-          }
-        },
-        // Provider 4: Search endpoints (fallback)
-        {
-          name: 'search',
-          fn: async () => {
-            const searchEndpoints = [
-              `https://${host}/api/instagram/search?query=${encodeURIComponent(u)}`,
-              `https://${host}/api/instagram/search-user?query=${encodeURIComponent(u)}`,
-            ];
-            for (const url of searchEndpoints) {
-              try {
-                const sj = await rapidJson(url, host, 15000);
-                const arr: any[] = sj?.result?.users || sj?.users || sj?.data?.users || sj?.results || [];
-                const hit = (Array.isArray(arr) ? arr : []).find((it:any)=> String(it?.username||it?.user?.username||'').toLowerCase() === u);
-                const pk = hit?.pk || hit?.id || hit?.user?.pk || hit?.user?.id;
-                if (pk) return String(pk);
-              } catch {}
-            }
-            return undefined;
-          }
-        }
       ];
       
-      // Try each provider with retry
+      // Try each provider (no retry to save time)
       for (const provider of providers) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const id = await provider.fn();
-            if (id) {
-              if (debug) console.log(`[Resolve IG] ${u} → ${id} via ${provider.name}`);
-              return String(id);
-            }
-          } catch (e) {
-            if (debug) console.log(`[Resolve IG] ${u} failed on ${provider.name} attempt ${attempt + 1}:`, e);
-            // Retry after 1 second
-            if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
+        try {
+          const id = await provider.fn();
+          if (id) {
+            if (debug) console.log(`[Resolve IG] ${u} → ${id} via ${provider.name}`);
+            return String(id);
           }
+        } catch (e) {
+          if (debug) console.log(`[Resolve IG] ${u} failed on ${provider.name}:`, e);
         }
       }
       
@@ -281,7 +271,8 @@ export async function POST(req: Request) {
           ? `Resolved ${resolved.length} of ${toProcess.length} users. ${failures.length} failures (check RapidAPI rate limits).`
           : `Successfully resolved all ${resolved.length} users!`,
       sources: debug ? sourceCounts : undefined, 
-      results: debug ? results : undefined 
+      results, // Always return results for debugging
+      failures_detail: failures // Return failure details
     });
   } catch (e:any) {
     console.error('[Resolve IG User IDs] Error:', e);

@@ -31,7 +31,7 @@ export async function GET(req: Request) {
     const endISO = String(url.searchParams.get('end') || new Date().toISOString().slice(0,10));
     const interval = (String(url.searchParams.get('interval')||'daily').toLowerCase());
     const mode = (String(url.searchParams.get('mode')||'accrual').toLowerCase());
-    const cutoff = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2025-12-20');
+    const cutoff = String(url.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
 
     const { data: accRows } = await supa.from('analytics_tracked_accounts').select('platform, username, label').order('created_at', { ascending: true });
     const accounts = (accRows||[]).map((r:any)=> ({ platform: String(r.platform), username: String(r.username).trim().replace(/^@+/,'').toLowerCase(), label: r.label||null }));
