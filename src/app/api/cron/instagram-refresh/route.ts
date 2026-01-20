@@ -33,6 +33,7 @@ async function asyncPool<T, R>(items: T[], limit: number, worker: (t: T, idx: nu
   return ret
 }
 
+
 export async function GET(req: NextRequest) {
   try {
     // Verify cron secret for security (support both header and query param)
@@ -41,43 +42,28 @@ export async function GET(req: NextRequest) {
     const secretParam = req.nextUrl.searchParams.get('secret')
     const cronSecret = process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY
     const isVercelCron = Boolean(req.headers.get('x-vercel-cron'))
-    
     // Allow if: Vercel Cron header, valid token, or valid secret param
     if (!isVercelCron && token !== cronSecret && secretParam !== cronSecret) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     const search = req.nextUrl.searchParams
-    const limit = parseInt(search.get('limit') || '200')
-    const concurrency = parseInt(search.get('concurrency') || '6')
+    const limit = parseInt(search.get('limit') || '20') // default batch kecil
+    const concurrency = parseInt(search.get('concurrency') || '4')
+    const offset = parseInt(search.get('offset') || '0')
 
     const supa = adminClient()
 
-    // Collect IG usernames from multiple sources
+    // Collect IG usernames from multiple sources (tanpa limit, ambil semua, batching di bawah)
     const set = new Set<string>()
-    // campaign_instagram_participants
-    try {
-      const { data } = await supa.from('campaign_instagram_participants').select('instagram_username').limit(limit)
-      for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase())
-    } catch {}
-    // employee_instagram_participants (missing before)
-    try {
-      const { data } = await supa.from('employee_instagram_participants').select('instagram_username').limit(limit)
-      for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase())
-    } catch {}
-    // user_instagram_usernames
-    try {
-      const { data } = await supa.from('user_instagram_usernames').select('instagram_username').limit(limit)
-      for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase())
-    } catch {}
-    // users.instagram_username
-    try {
-      const { data } = await supa.from('users').select('instagram_username').not('instagram_username', 'is', null).limit(limit)
-      for (const r of data || []) if ((r as any).instagram_username) set.add(String((r as any).instagram_username).replace(/^@/, '').toLowerCase())
-    } catch {}
+    try { const { data } = await supa.from('campaign_instagram_participants').select('instagram_username'); for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase()) } catch {}
+    try { const { data } = await supa.from('employee_instagram_participants').select('instagram_username'); for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase()) } catch {}
+    try { const { data } = await supa.from('user_instagram_usernames').select('instagram_username'); for (const r of data || []) if (r.instagram_username) set.add(String(r.instagram_username).replace(/^@/, '').toLowerCase()) } catch {}
+    try { const { data } = await supa.from('users').select('instagram_username').not('instagram_username', 'is', null); for (const r of data || []) if ((r as any).instagram_username) set.add(String((r as any).instagram_username).replace(/^@/, '').toLowerCase()) } catch {}
 
-    const usernames = Array.from(set).slice(0, limit)
-    if (!usernames.length) return NextResponse.json({ updated: 0, results: [], message: 'No IG usernames' })
+    const allUsernames = Array.from(set)
+    const usernames = allUsernames.slice(offset, offset + limit)
+    if (!usernames.length) return NextResponse.json({ updated: 0, results: [], message: 'No IG usernames', done: true })
 
     // Resolve and cache user_id for any usernames missing in instagram_user_ids
     const host = process.env.RAPIDAPI_INSTAGRAM_HOST || 'instagram120.p.rapidapi.com'
@@ -237,22 +223,6 @@ export async function GET(req: NextRequest) {
 
     const inserted = results.reduce((a:any,r:any)=> a + (Number((r as any).inserted)||0), 0)
     
-    // AUTO-TRIGGER ACCRUAL BACKFILL after Instagram refresh
-    try {
-      const accrualUrl = new URL(`${req.nextUrl.protocol}//${req.nextUrl.host}/api/backfill/accrual`)
-      const accrualRes = await fetch(accrualUrl.toString(), {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${cronSecret}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ days: 28 }) // Backfill 28 days for accrual mode
-      })
-      const accrualJson = await accrualRes.json().catch(() => ({}))
-      console.log('[instagram-refresh] Accrual backfill triggered:', accrualJson)
-    } catch (e: any) {
-      console.warn('[instagram-refresh] Failed to trigger accrual backfill:', e?.message)
-    }
     
     return NextResponse.json({ updated: results.length, inserted, results })
   } catch (e:any) {
