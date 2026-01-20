@@ -134,67 +134,45 @@ export async function GET(req: NextRequest) {
         // Do not cleanup or create user on cron
         uurl.searchParams.set('create', '0')
         
-        // AGGRESSIVE RETRY: Up to 3 attempts with exponential backoff
+        // FAIL FAST: Timeout 15 detik per user, tidak ada retry
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
         let res: Response | null = null;
         let json: any = {};
         let lastError: string = '';
-        
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            res = await fetch(uurl.toString(), { cache: 'no-store' })
-            json = await res.json().catch(()=>({}))
-            
-            // Success criteria: 200 status AND (has inserts OR metrics inserted)
-            if (res.ok && (json?.inserted > 0 || json?.metrics_inserted)) {
-              return { 
-                username: u, 
-                ok: true, 
-                status: res.status, 
-                inserted: json.inserted || 0, 
-                metrics_inserted: json.metrics_inserted || false,
-                owner_user_id: json.owner_user_id || null,
-                source: json.source,
-                attempts: attempt + 1
-              };
-            }
-            
-            // If 200 but no data, retry
-            if (res.ok && json?.inserted === 0) {
-              lastError = `No data inserted (attempt ${attempt + 1})`;
-              if (attempt < 2) {
-                await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); // 2s, 4s
-                continue;
-              }
-            }
-            
-            // If not ok, retry
-            if (!res.ok) {
-              lastError = `HTTP ${res.status} (attempt ${attempt + 1})`;
-              if (attempt < 2) {
-                await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-                continue;
-              }
-            }
-            
-            break;
-          } catch (e: any) {
-            lastError = String(e?.message || e);
-            if (attempt < 2) {
-              await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-              continue;
-            }
-          }
+        let ok = false;
+        try {
+          res = await fetch(uurl.toString(), { cache: 'no-store', signal: controller.signal })
+          json = await res.json().catch(()=>({}))
+          ok = res.ok && (json?.inserted > 0 || json?.metrics_inserted)
+        } catch (e: any) {
+          lastError = e?.name === 'AbortError' ? 'Timeout (15s)' : String(e?.message || e)
+        } finally {
+          clearTimeout(timer)
         }
-        return {
-          username: u,
-          ok: res?.ok || false,
-          status: res?.status || 0,
-          inserted: json?.inserted || 0,
-          metrics_inserted: true,
-          owner_user_id: json?.owner_user_id || null,
-          source: json?.source,
-          error: lastError,
-          attempts: 3
+        if (ok) {
+          return {
+            username: u,
+            ok: true,
+            status: res?.status || 200,
+            inserted: json?.inserted || 0,
+            metrics_inserted: json?.metrics_inserted || false,
+            owner_user_id: json?.owner_user_id || null,
+            source: json?.source,
+            attempts: 1
+          }
+        } else {
+          return {
+            username: u,
+            ok: false,
+            status: res?.status || 0,
+            inserted: json?.inserted || 0,
+            metrics_inserted: false,
+            owner_user_id: json?.owner_user_id || null,
+            source: json?.source,
+            error: lastError || (res ? `HTTP ${res.status}` : 'No response'),
+            attempts: 1
+          }
         }
       } catch (e:any) {
         return { username: u, ok: false, error: String(e?.message || e), attempts: 0 }
