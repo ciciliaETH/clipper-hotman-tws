@@ -172,46 +172,13 @@ export async function GET(req: NextRequest) {
             }
           }
         }
-        
-        // After fetch, aggregate to social_metrics like TikTok
-        let ownerUserId: string | null = null
-        try {
-          const norm = String(u).trim().replace(/^@+/, '').toLowerCase()
-          const { data: u1 } = await supa.from('users').select('id').eq('instagram_username', norm).maybeSingle(); if (u1?.id) ownerUserId = String(u1.id)
-          if (!ownerUserId) { const { data: u2 } = await supa.from('user_instagram_usernames').select('user_id').eq('instagram_username', norm).maybeSingle(); if (u2?.user_id) ownerUserId = String(u2.user_id) }
-        } catch {}
-        if (ownerUserId) {
-          try {
-            const handles = new Set<string>()
-            try { const { data: pr } = await supa.from('users').select('instagram_username').eq('id', ownerUserId).maybeSingle(); if (pr?.instagram_username) handles.add(String(pr.instagram_username).replace(/^@+/, '').toLowerCase()) } catch {}
-            try { const { data: extras } = await supa.from('user_instagram_usernames').select('instagram_username').eq('user_id', ownerUserId); for (const r of extras||[]) handles.add(String((r as any).instagram_username).replace(/^@+/, '').toLowerCase()) } catch {}
-            if (handles.size) {
-              const list = Array.from(handles)
-              const start = new Date(); start.setUTCDate(start.getUTCDate()-59); const startISO = start.toISOString().slice(0,10)
-              const { data: rows } = await supa
-                .from('instagram_posts_daily')
-                .select('play_count, like_count, comment_count, username, post_date')
-                .in('username', list)
-                .gte('post_date', startISO)
-              const agg = (rows||[]).reduce((a:any,r:any)=>({
-                views: a.views + (Number((r as any).play_count)||0),
-                likes: a.likes + (Number((r as any).like_count)||0),
-                comments: a.comments + (Number((r as any).comment_count)||0),
-              }), { views:0, likes:0, comments:0 })
-              const nowIso = new Date().toISOString()
-              await supa.from('social_metrics').upsert({ user_id: ownerUserId, platform: 'instagram', followers: 0, likes: agg.likes, views: agg.views, comments: agg.comments, shares: 0, saves: 0, last_updated: nowIso }, { onConflict: 'user_id,platform' })
-              await supa.from('social_metrics_history').insert({ user_id: ownerUserId, platform: 'instagram', followers: 0, likes: agg.likes, views: agg.views, comments: agg.comments, shares: 0, saves: 0, captured_at: nowIso }).catch(()=>{})
-            }
-          } catch {}
-        }
-
         return {
           username: u,
           ok: res?.ok || false,
           status: res?.status || 0,
           inserted: json?.inserted || 0,
           metrics_inserted: true,
-          owner_user_id: ownerUserId,
+          owner_user_id: json?.owner_user_id || null,
           source: json?.source,
           error: lastError,
           attempts: 3
@@ -219,13 +186,14 @@ export async function GET(req: NextRequest) {
       } catch (e:any) {
         return { username: u, ok: false, error: String(e?.message || e), attempts: 0 }
       }
-    })
 
-    const inserted = results.reduce((a:any,r:any)=> a + (Number((r as any).inserted)||0), 0)
-    
-    
-    return NextResponse.json({ updated: results.length, inserted, results })
-  } catch (e:any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+
+    }) // end of asyncPool callback
+    // Actually call asyncPool and return the results
+    // If you want to return the results, do so here:
+    return NextResponse.json({ updated: results.filter(r => r.ok).length, results, done: usernames.length < limit })
+  } catch (err) {
+    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 })
   }
-}
+} // end of GET function
+

@@ -526,7 +526,14 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const ok = await ensureAdmin();
+    let ok = await ensureAdmin();
+    if (!ok) {
+      // Tambahkan pengecekan CRON_SECRET
+      const auth = req.headers.get('authorization') || '';
+      const token = auth.replace(/^Bearer\s+/i, '');
+      const cronSecret = process.env.CRON_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (token && cronSecret && token === cronSecret) ok = true;
+    }
     if (!ok) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     return await refreshHandler(req);
   } catch (error: any) {
