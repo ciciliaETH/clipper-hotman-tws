@@ -48,8 +48,9 @@ export async function GET(req: NextRequest) {
     }
 
     const search = req.nextUrl.searchParams
-    const limit = parseInt(search.get('limit') || '20') // default batch kecil
-    const concurrency = parseInt(search.get('concurrency') || '4')
+    // Set default batch kecil agar tidak timeout
+    const limit = parseInt(search.get('limit') || '2')
+    const concurrency = parseInt(search.get('concurrency') || '1')
     const offset = parseInt(search.get('offset') || '0')
 
     const supa = adminClient()
@@ -62,8 +63,20 @@ export async function GET(req: NextRequest) {
     try { const { data } = await supa.from('users').select('instagram_username').not('instagram_username', 'is', null); for (const r of data || []) if ((r as any).instagram_username) set.add(String((r as any).instagram_username).replace(/^@/, '').toLowerCase()) } catch {}
 
     const allUsernames = Array.from(set)
+    const total = allUsernames.length
     const usernames = allUsernames.slice(offset, offset + limit)
-    if (!usernames.length) return NextResponse.json({ updated: 0, results: [], message: 'No IG usernames', done: true })
+    if (!usernames.length) {
+      return NextResponse.json({
+        updated: 0,
+        results: [],
+        message: 'No IG usernames',
+        offset,
+        nextOffset: offset,
+        limit,
+        total,
+        done: true
+      })
+    }
 
     // Resolve and cache user_id for any usernames missing in instagram_user_ids
     const host = process.env.RAPIDAPI_INSTAGRAM_HOST || 'instagram120.p.rapidapi.com'
@@ -191,7 +204,18 @@ export async function GET(req: NextRequest) {
     }) // end of asyncPool callback
     // Actually call asyncPool and return the results
     // If you want to return the results, do so here:
-    return NextResponse.json({ updated: results.filter(r => r.ok).length, results, done: usernames.length < limit })
+    // Calculate next offset and done status
+    const nextOffset = offset + limit
+    const done = nextOffset >= total
+    return NextResponse.json({
+      updated: results.filter(r => r.ok).length,
+      results,
+      offset,
+      nextOffset,
+      limit,
+      total,
+      done
+    })
   } catch (err) {
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 })
   }
