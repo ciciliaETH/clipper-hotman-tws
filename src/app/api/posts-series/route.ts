@@ -21,6 +21,8 @@ export async function GET(req: Request) {
     const endDate = searchParams.get('end') || new Date().toISOString().slice(0, 10);
     const campaignId = searchParams.get('campaign_id') || '';
     const platform = (searchParams.get('platform') || 'all').toLowerCase();
+    const debugMode = searchParams.get('debug') === '1';
+    let debug: any = debugMode ? { tiktok: {}, instagram: {} } : undefined;
 
     // Get all employees (karyawan) or campaign-specific employees
     let employeeIds: string[] = [];
@@ -60,11 +62,22 @@ export async function GET(req: Request) {
       .select('id, tiktok_username, instagram_username')
       .in('id', employeeIds);
 
-    // Get TikTok usernames (from users + employee_participants)
+    // Get TikTok usernames (from users + user_tiktok_usernames + employee_participants)
     const tiktokUsernames = new Set<string>();
     for (const u of users || []) {
       if (u.tiktok_username) {
         tiktokUsernames.add(u.tiktok_username.toLowerCase().replace(/^@+/, ''));
+      }
+    }
+    // From mapping table
+    if (employeeIds.length) {
+      const { data: ttMap } = await supabase
+        .from('user_tiktok_usernames')
+        .select('tiktok_username, user_id')
+        .in('user_id', employeeIds);
+      for (const r of ttMap || []) {
+        const h = String((r as any).tiktok_username||'').trim().toLowerCase().replace(/^@+/, '');
+        if (h) tiktokUsernames.add(h);
       }
     }
     
@@ -78,11 +91,21 @@ export async function GET(req: Request) {
       }
     }
 
-    // Get Instagram usernames (from users + employee_instagram_participants)
+    // Get Instagram usernames (from users + user_instagram_usernames + employee_instagram_participants)
     const instagramUsernames = new Set<string>();
     for (const u of users || []) {
       if (u.instagram_username) {
         instagramUsernames.add(u.instagram_username.toLowerCase().replace(/^@+/, ''));
+      }
+    }
+    if (employeeIds.length) {
+      const { data: igMap } = await supabase
+        .from('user_instagram_usernames')
+        .select('instagram_username, user_id')
+        .in('user_id', employeeIds);
+      for (const r of igMap || []) {
+        const h = String((r as any).instagram_username||'').trim().toLowerCase().replace(/^@+/, '');
+        if (h) instagramUsernames.add(h);
       }
     }
     
@@ -107,28 +130,67 @@ export async function GET(req: Request) {
       postsByDate.set(dateStr, { tiktok: 0, instagram: 0, total: 0 });
     }
 
-    // Query TikTok posts
-    if ((platform === 'all' || platform === 'tiktok') && tiktokUsernames.size > 0) {
-      const { data: ttPosts } = await supabase
+    // Query TikTok posts (prefer taken_at; include legacy post_date when taken_at is null)
+    if (platform === 'all' || platform === 'tiktok') {
+      // Single query using OR to avoid missing rows due to filter composition
+      const startTs = `${startDate}T00:00:00Z`;
+      const endNext = new Date(startTs);
+      // end bound exclusive: next day 00:00Z when start==end, or end+1day 00:00Z
+      const endBase = new Date(`${endDate}T00:00:00Z`);
+      const endNextTsDate = new Date(endBase.getTime() + 24*60*60*1000);
+      const endTs = endNextTsDate.toISOString();
+      // Use two queries (stable across PostgREST versions)
+      const { data: ttTaken } = await supabase
         .from('tiktok_posts_daily')
-        .select('video_id, username, post_date, title')
-        .in('username', Array.from(tiktokUsernames))
+        .select('video_id, username, taken_at, post_date, title')
+        .gte('taken_at', startTs)
+        .lt('taken_at', endTs);
+      const { data: ttLegacy } = await supabase
+        .from('tiktok_posts_daily')
+        .select('video_id, username, taken_at, post_date, title')
+        .is('taken_at', null)
         .gte('post_date', startDate)
-        .lte('post_date', endDate);
+        .lt('post_date', new Date(new Date(`${endDate}T00:00:00Z`).getTime() + 24*60*60*1000).toISOString().slice(0,10));
+      let ttPosts = ([] as any[]).concat(ttTaken||[], ttLegacy||[]);
+      if (debugMode) debug.tiktok = { taken: (ttTaken||[]).length, legacy: (ttLegacy||[]).length };
+      // Safety fallback: if still empty, fallback to post_date window
+      if (!ttPosts || ttPosts.length === 0) {
+        const { data: ttByPostDate } = await supabase
+          .from('tiktok_posts_daily')
+          .select('video_id, username, taken_at, post_date, title')
+          .gte('post_date', startDate)
+          .lt('post_date', new Date(new Date(`${endDate}T00:00:00Z`).getTime() + 24*60*60*1000).toISOString().slice(0,10));
+        ttPosts = ttByPostDate || [];
+        if (debugMode) debug.tiktok.fallback_post_date = (ttByPostDate||[]).length;
+      }
 
-      // Group by date, count unique video_ids
+      // Group by date (taken_at day), count unique video_ids
       const videosByDate = new Map<string, Set<string>>();
       for (const row of ttPosts || []) {
         // Apply hashtag filter
         if (requiredHashtags && requiredHashtags.length > 0) {
-          if (!hasRequiredHashtag(row.title, requiredHashtags)) continue;
+          if (!hasRequiredHashtag((row as any).title, requiredHashtags)) continue;
         }
-        
-        const date = String(row.post_date);
-        if (!videosByDate.has(date)) {
-          videosByDate.set(date, new Set());
+        const raw = (row as any).taken_at as string | null;
+        const dStr = raw ? String(raw).slice(0,10) : String((row as any).post_date);
+        if (!videosByDate.has(dStr)) videosByDate.set(dStr, new Set());
+        videosByDate.get(dStr)!.add(String((row as any).video_id));
+      }
+
+      // Extra daily fallback: if only satu hari dan masih kosong, pakai equality pada post_date (legacy)
+      const daySpan = Math.max(1, Math.floor((end.getTime() - start.getTime())/ (24*60*60*1000)) + 1);
+      if (videosByDate.size === 0 && daySpan === 1) {
+        const { data: ttEq } = await supabase
+          .from('tiktok_posts_daily')
+          .select('video_id, taken_at, post_date, title')
+          .eq('post_date', startDate);
+        for (const row of ttEq||[]) {
+          const raw = (row as any).taken_at as string | null;
+          const dStr = raw ? String(raw).slice(0,10) : String((row as any).post_date);
+          if (!videosByDate.has(dStr)) videosByDate.set(dStr, new Set());
+          videosByDate.get(dStr)!.add(String((row as any).video_id));
         }
-        videosByDate.get(date)!.add(row.video_id);
+        if (debugMode) debug.tiktok.eq_post_date = (ttEq||[]).length;
       }
 
       // Add to postsByDate
@@ -138,26 +200,69 @@ export async function GET(req: Request) {
         entry.total += videos.size;
         postsByDate.set(date, entry);
       }
+
+      // Last-resort fallback: if nothing filled, use DB-side count per day
+      if ([...postsByDate.values()].every(v => (v.tiktok||0) === 0)) {
+        const days: string[] = Array.from(postsByDate.keys());
+        for (const day of days) {
+          const startISO = `${day}T00:00:00Z`;
+          const endISO = new Date(new Date(startISO).getTime() + 24*60*60*1000).toISOString();
+          const { count: c1 } = await supabase
+            .from('tiktok_posts_daily')
+            .select('video_id', { head: true, count: 'exact' })
+            .gte('taken_at', startISO)
+            .lt('taken_at', endISO);
+          const { count: c2 } = await supabase
+            .from('tiktok_posts_daily')
+            .select('video_id', { head: true, count: 'exact' })
+            .is('taken_at', null)
+            .eq('post_date', day);
+          const cnt = (c1 || 0) + (c2 || 0);
+          if (debugMode) {
+            debug.tiktok = { ...(debug.tiktok||{}), [`count_${day}`]: cnt };
+          }
+          const entry = postsByDate.get(day) || { tiktok: 0, instagram: 0, total: 0 };
+          entry.tiktok = cnt;
+          entry.total += cnt;
+          postsByDate.set(day, entry);
+        }
+      }
     }
 
-    // Query Instagram posts
-    if ((platform === 'all' || platform === 'instagram') && instagramUsernames.size > 0) {
-      const { data: igPosts } = await supabase
+    // Query Instagram posts (prefer taken_at; include legacy rows with taken_at IS NULL using post_date)
+    if (platform === 'all' || platform === 'instagram') {
+      const startTsIG = `${startDate}T00:00:00Z`;
+      const endTsIG = new Date(new Date(`${endDate}T00:00:00Z`).getTime() + 24*60*60*1000).toISOString();
+      // 1) Rows with taken_at in range
+      const { data: igTaken } = await supabase
         .from('instagram_posts_daily')
-        .select('id, username, post_date, caption')
+        .select('id, username, taken_at, post_date, caption')
         .in('username', Array.from(instagramUsernames))
+        .gte('taken_at', startTsIG)
+        .lt('taken_at', endTsIG);
+      // 2) Legacy rows where taken_at is null but post_date in range
+      const { data: igLegacy } = await supabase
+        .from('instagram_posts_daily')
+        .select('id, username, taken_at, post_date, caption')
+        .in('username', Array.from(instagramUsernames))
+        .is('taken_at', null)
         .gte('post_date', startDate)
-        .lte('post_date', endDate);
+        .lt('post_date', new Date(new Date(`${endDate}T00:00:00Z`).getTime() + 24*60*60*1000).toISOString().slice(0,10));
+      const igPosts = ([] as any[]).concat(igTaken||[], igLegacy||[]);
+      if (debugMode) debug.instagram = { taken: (igTaken||[]).length, legacy: (igLegacy||[]).length };
 
-      // Group by date, count unique ids
+      // Group by taken_at day, count unique ids
       const postIdsByDate = new Map<string, Set<string>>();
       for (const row of igPosts || []) {
         // Apply hashtag filter
         if (requiredHashtags && requiredHashtags.length > 0) {
           if (!hasRequiredHashtag((row as any).caption, requiredHashtags)) continue;
         }
-        
-        const date = String((row as any).post_date);
+
+        // Prefer taken_at date; fallback to post_date if null
+        const rawTaken = (row as any).taken_at as string | null;
+        const date = rawTaken ? new Date(rawTaken).toISOString().slice(0,10) : String((row as any).post_date);
+        if (!date) continue;
         if (!postIdsByDate.has(date)) {
           postIdsByDate.set(date, new Set());
         }
@@ -190,7 +295,8 @@ export async function GET(req: Request) {
       total,
       start: startDate,
       end: endDate,
-      platform
+      platform,
+      ...(debugMode ? { debug } : {})
     });
   } catch (e: any) {
     console.error('[posts-series] error:', e);

@@ -44,7 +44,7 @@ export default function LeaderboardPage() {
     try {
       const url = new URL('/api/leaderboard', window.location.origin);
       // Global leaderboard semua karyawan (bukan hanya 1 group)
-      url.searchParams.set('mode','accrual');
+      url.searchParams.set('mode','postdate');
       url.searchParams.set('scope','employees');
       
       if (useCustomDates) {
@@ -308,19 +308,6 @@ export default function LeaderboardPage() {
                         const igs: string[] = Array.from(new Set([selectedUser.instagram_username, ...((selectedUser.extra_instagram_usernames||[]) as string[])]).values()).filter(Boolean) as string[];
                         return igs.map((u:string, idx:number)=> (
                           <a key={`ig-${u}-${idx}`} href={`https://www.instagram.com/${u}/`} target="_blank" rel="noreferrer" className="px-3 py-1 rounded-lg border border-white/10 bg-white/5 text-white/80 hover:text-white hover:bg-white/10">Instagram @{u}</a>
-                        ));
-                      })()}
-                    </div>
-                  </div>
-                )}
-                {selectedUser && (
-                  <div className="mt-4 text-sm">
-                    <div className="text-white/60 mb-2">Di grup mana</div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {(() => {
-                        const names = employeeGroups[String(selectedUser.id)] || [];
-                        return (names.length? names : ['(hanya grup aktif)']).map((g:string, idx:number)=> (
-                          <span key={`grp-${idx}`} className="px-3 py-1 rounded-lg border border-white/10 bg-white/5 text-white/80">{g}</span>
                         ));
                       })()}
                     </div>

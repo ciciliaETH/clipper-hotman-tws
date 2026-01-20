@@ -34,7 +34,8 @@ async function fetchInstagramData(username: string, baseUrl: string, timeout = 2
   const start = Date.now();
   try {
     // Hint the downstream route to fit within our timeout using budget and pagination caps
-    const url = `${baseUrl}/api/fetch-ig/${encodeURIComponent(username)}?create=1&allow_username=0&max_pages=6&page_size=40&time_budget_ms=${Math.max(5000, Math.min(59000, Math.floor(timeout * 0.95)))}`;
+    // Aggregator-only mode: do NOT use RapidAPI. The fetch route will try link-based user_id resolution once.
+    const url = `${baseUrl}/api/fetch-ig/${encodeURIComponent(username)}?create=1&allow_username=0&aggregator_only=1&max_pages=6&page_size=40&time_budget_ms=${Math.max(5000, Math.min(59000, Math.floor(timeout * 0.95)))}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     
@@ -109,7 +110,8 @@ async function refreshHandler(req: Request) {
   const accountsPerBatch = 1; // Process 1 account per batch (FIT within 60s Vercel limit!)
   const autoContinue = body?.auto_continue === true; // default FALSE - manual batch to prevent timeout
   const offset = Math.max(0, Number(body?.offset || 0)); // Track which batch we're on
-  const fetchTimeout = 20000; // 20s timeout (max 2 attempts = 20s + 5s + 20s = 45s < 60s Vercel limit)
+  // Reduce false positives where downstream finishes at ~20s
+  const fetchTimeout = 30000; // 30s timeout
   
   // Get base URL for fetch-ig endpoint
   const protocol = req.headers.get('x-forwarded-proto') || 'http';
@@ -150,30 +152,33 @@ async function refreshHandler(req: Request) {
     }, { onConflict: 'platform,username' });
   }
 
-  // Get ALL unique Instagram usernames from ALL campaign_instagram_participants (no date filter!)
-  // CRITICAL: ORDER BY ensures consistent username order across all requests
-  const { data: rows } = await supa
-    .from('campaign_instagram_participants')
-    .select('instagram_username')
-    .not('instagram_username', 'is', null)
-    .order('instagram_username', { ascending: true }) // Alphabetical order for consistency
-    .limit(limit);
-  
-  if (!rows || rows.length === 0) {
+  // Collect IG usernames from multiple non-campaign sources (and campaign if exists)
+  const set = new Set<string>();
+  const norm = (u:string)=> String(u||'').trim().replace(/^@+/, '').toLowerCase();
+  try {
+    const { data } = await supa.from('user_instagram_usernames').select('instagram_username').limit(limit);
+    for (const r of data||[]) if ((r as any).instagram_username) set.add(norm((r as any).instagram_username));
+  } catch {}
+  try {
+    const { data } = await supa.from('users').select('instagram_username').not('instagram_username','is',null).limit(limit);
+    for (const r of data||[]) if ((r as any).instagram_username) set.add(norm((r as any).instagram_username));
+  } catch {}
+  try {
+    const { data } = await supa.from('employee_instagram_participants').select('instagram_username').limit(limit);
+    for (const r of data||[]) if ((r as any).instagram_username) set.add(norm((r as any).instagram_username));
+  } catch {}
+  // Optional: existing campaign list (if present)
+  try {
+    const { data } = await supa.from('campaign_instagram_participants').select('instagram_username').limit(limit);
+    for (const r of data||[]) if ((r as any).instagram_username) set.add(norm((r as any).instagram_username));
+  } catch {}
+
+  const allUsernames = Array.from(set).slice(0, limit);
+  if (!allUsernames.length) {
     return NextResponse.json({ 
-      total_usernames: 0, 
-      processed: 0, 
-      success: 0, 
-      failed: 0,
-      message: 'No Instagram usernames found in campaign_instagram_participants'
+      total_usernames: 0, processed: 0, success: 0, failed: 0, message: 'No IG usernames' 
     });
   }
-
-  // Get unique usernames
-  const allUsernames = Array.from(new Set(
-    rows.map((r: any) => String(r.instagram_username || '').trim().replace(/^@/, '').toLowerCase())
-      .filter(Boolean)
-  ));
 
   // Filter by those that have instagram_user_id if requested
   let usernamesToFetch = allUsernames;
@@ -211,7 +216,8 @@ async function refreshHandler(req: Request) {
   
   let totalSuccess = 0;
   let totalFailed = 0;
-  const maxRetries = 1; // Retry 1x only (fit within 60s Vercel timeout)
+  // Allow multiple inline retries while keeping within time budget
+  const maxRetries = 10;
   const failedAccountsQueue: string[] = []; // Track failed accounts to retry in next batch
   
   // CRITICAL: ALWAYS process ONLY 1 batch per request to avoid timeout
@@ -255,6 +261,7 @@ async function refreshHandler(req: Request) {
       // Retry logic for reliability - ZERO DATA LOSS
       let result: FetchResult | null = null;
       let attempt = 0;
+      const usernameStart = Date.now();
       
       while (attempt <= maxRetries) {
         result = await fetchInstagramData(username, baseUrl, fetchTimeout);
@@ -263,11 +270,22 @@ async function refreshHandler(req: Request) {
         if (result.ok) {
           break;
         }
+        // Stop retry if not found
+        if (result.status === 404) {
+          console.log(`[Instagram Refresh] ${username} not found (404). Skipping further retries.`);
+          break;
+        }
+        // Time budget safeguard (keep ~8s buffer)
+        const elapsed = Date.now() - usernameStart;
+        if (elapsed > 52000) {
+          console.log(`[Instagram Refresh] Time budget exceeded for ${username} after ${attempt} attempts.`);
+          break;
+        }
         
         // If rate limited, wait shorter to fit in 60s timeout
         if (result.status === 429 && attempt < maxRetries) {
-          console.log(`[Instagram Refresh] Rate limited on ${username}, waiting 10s before retry ${attempt + 1}/${maxRetries}`);
-          await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds only (must fit in 60s total)
+          console.log(`[Instagram Refresh] Rate limited on ${username}, waiting 5s before retry ${attempt + 1}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
           attempt++;
           continue;
         }
@@ -275,7 +293,7 @@ async function refreshHandler(req: Request) {
         // If server error or timeout, retry with short delay
         if ((result.status >= 500 || result.status === 408) && attempt < maxRetries) {
           console.log(`[Instagram Refresh] Error ${result.status} on ${username}, retrying ${attempt + 1}/${maxRetries}`);
-          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds only (must fit in 60s total)
+          await new Promise(resolve => setTimeout(resolve, 3000));
           attempt++;
           continue;
         }
@@ -296,6 +314,85 @@ async function refreshHandler(req: Request) {
         const views = result.data?.instagram?.views || 0;
         if (inserted === 0 && views === 0) {
           console.warn(`[Instagram Refresh] WARNING: ${username} returned ZERO data (empty account or API issue)`);
+          // PATCH: Force insert 0-row to social_metrics_history for visibility
+          try {
+            const normU = String(username).trim().replace(/^@+/, '').toLowerCase();
+            let ownerUserId: string | null = null;
+            try {
+              const { data: u1 } = await supa.from('users').select('id').eq('instagram_username', normU).maybeSingle(); if (u1?.id) ownerUserId = String(u1.id);
+              if (!ownerUserId) { const { data: u2 } = await supa.from('user_instagram_usernames').select('user_id').eq('instagram_username', normU).maybeSingle(); if (u2?.user_id) ownerUserId = String(u2.user_id); }
+            } catch {}
+            if (ownerUserId) {
+              const nowIso = new Date().toISOString();
+              await supa.from('social_metrics_history').insert({
+                user_id: ownerUserId,
+                platform: 'instagram',
+                followers: 0,
+                likes: 0,
+                views: 0,
+                comments: 0,
+                shares: 0,
+                saves: 0,
+                captured_at: nowIso
+              });
+            }
+          } catch (e) {
+            console.warn('[Instagram Refresh] Failed to force-insert 0-row to social_metrics_history for', username, e);
+          }
+        }
+        // NEW: Aggregate into social_metrics/history like TikTok
+        try {
+          const normU = String(username).trim().replace(/^@+/, '').toLowerCase();
+          let ownerUserId: string | null = null;
+          try {
+            const { data: u1 } = await supa.from('users').select('id').eq('instagram_username', normU).maybeSingle(); if (u1?.id) ownerUserId = String(u1.id);
+            if (!ownerUserId) { const { data: u2 } = await supa.from('user_instagram_usernames').select('user_id').eq('instagram_username', normU).maybeSingle(); if (u2?.user_id) ownerUserId = String(u2.user_id); }
+          } catch {}
+          if (ownerUserId) {
+            const handles = new Set<string>();
+            try { const { data: pr } = await supa.from('users').select('instagram_username').eq('id', ownerUserId).maybeSingle(); if (pr?.instagram_username) handles.add(String(pr.instagram_username).replace(/^@+/, '').toLowerCase()); } catch {}
+            try { const { data: extras } = await supa.from('user_instagram_usernames').select('instagram_username').eq('user_id', ownerUserId); for (const r of extras||[]) handles.add(String((r as any).instagram_username).replace(/^@+/, '').toLowerCase()); } catch {}
+            if (handles.size) {
+              const list = Array.from(handles);
+              // LIFETIME TOTALS for social_metrics: compute with DB aggregation to avoid arithmetic drift
+              // Query all rows for this user (for fallback logic)
+              const { data: rows } = await supa
+                .from('instagram_posts_daily')
+                .select('id')
+                .in('username', list);
+              const { data: totals } = await supa
+                .from('instagram_posts_daily')
+                .select('views:sum(play_count),likes:sum(like_count),comments:sum(comment_count),posts_total:count(id)')
+                .in('username', list)
+                .single();
+              let agg = { views:0, likes:0, comments:0 } as any;
+              if (totals && ((totals as any).posts_total > 0 || Number((totals as any).views||0) > 0)) {
+                agg = {
+                  views: Number((totals as any)?.views||0) || 0,
+                  likes: Number((totals as any)?.likes||0) || 0,
+                  comments: Number((totals as any)?.comments||0) || 0,
+                };
+              }
+              // If posts_daily produced zero rows (aggregator-only with missing timestamps), fallback to response totals
+              if ((rows?.length || 0) === 0) {
+                const respTotals = {
+                  views: Number(result.data?.total_views || result.data?.instagram?.views || 0) || 0,
+                  likes: Number(result.data?.total_likes || result.data?.instagram?.likes || 0) || 0,
+                  comments: Number(result.data?.total_comments || result.data?.instagram?.comments || 0) || 0,
+                };
+                if (respTotals.views + respTotals.likes + respTotals.comments > 0) {
+                  agg = respTotals;
+                }
+              }
+              const nowIso = new Date().toISOString();
+              await supa.from('social_metrics').upsert({ user_id: ownerUserId, platform: 'instagram', followers: 0, likes: agg.likes, views: agg.views, comments: agg.comments, shares: 0, saves: 0, last_updated: nowIso }, { onConflict: 'user_id,platform' });
+              try {
+                await supa.from('social_metrics_history').insert({ user_id: ownerUserId, platform: 'instagram', followers: 0, likes: agg.likes, views: agg.views, comments: agg.comments, shares: 0, saves: 0, captured_at: nowIso });
+              } catch {}
+            }
+          }
+        } catch (e) {
+          console.warn('[Instagram Refresh] Failed to update social_metrics for', username, e);
         }
         batchSuccess++;
         totalSuccess++;

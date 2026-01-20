@@ -213,40 +213,20 @@ export default function AdminPage() {
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   const [backfillDetail, setBackfillDetail] = useState<any | null>(null);
 
-  // Backfill khusus campaign aktif + auto-refresh snapshot
+  // Global Refresh All (tanpa campaign)
   const [campaignBackfilling, setCampaignBackfilling] = useState(false);
   const runActiveCampaignBackfill = async () => {
-    if (!activeCampaignId) { alert('Tidak ada campaign aktif'); return; }
-    if (!confirm('Refresh semua karyawan, Proses 15 Menit')) return;
+    if (!confirm('Refresh semua akun (TikTok & Instagram). Proses bisa memakan waktu. Lanjutkan?')) return;
     setCampaignBackfilling(true);
     setBackfillMsg(null); setBackfillDetail(null);
     try {
-      // 1) Ambil peserta TikTok
-      const partsRes = await fetch(`/api/campaigns/${activeCampaignId}/participants`);
-      const parts = await partsRes.json();
-      if (!partsRes.ok) throw new Error(parts?.error || 'Gagal mengambil peserta');
-      const usernames = (parts || []).map((p:any)=> String(p.tiktok_username||p.username||'').replace(/^@/, '').toLowerCase()).filter(Boolean);
-      if (!usernames.length) throw new Error('Peserta kosong');
-      // 1b) Ambil peserta Instagram (jika ada)
-      let igUsernames: string[] = [];
-      try {
-        const igRes = await fetch(`/api/campaigns/${activeCampaignId}/participants/ig`);
-        const igParts = await igRes.json();
-        if (igRes.ok) igUsernames = (igParts||[]).map((r:any)=> String(r.instagram_username||'').replace(/^@/, '').toLowerCase()).filter(Boolean);
-      } catch {}
-      // 2) Backfill all-time (default start jauh)
-      const body = { usernames, instagram_usernames: igUsernames, chunkMonthly: false } as any;
-      const bfRes = await fetch('/api/backfill/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-      const bf = await bfRes.json().catch(()=>({}));
-      if (!bfRes.ok) throw new Error(bf?.error || 'Backfill gagal');
-      // 3) Refresh snapshot campaign agar UI terlihat
-      const rfRes = await fetch(`/api/campaigns/${activeCampaignId}/refresh`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
-      const rf = await rfRes.json().catch(()=>({}));
-      if (!rfRes.ok) throw new Error(rf?.error || 'Refresh snapshot gagal');
-      setBackfillMsg(`Backfill & refresh selesai. Peserta: ${usernames.length}`);
-      setBackfillDetail({ backfill: bf, refresh: rf });
+      const res = await fetch('/api/refresh-all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      const j = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(j?.error || 'Refresh All gagal');
+      setBackfillMsg(`Refresh All selesai. Akun diproses: ${j.updated || 0}`);
+      setBackfillDetail(j);
     } catch (e:any) {
-      setBackfillMsg(e?.message || 'Backfill gagal');
+      setBackfillMsg(e?.message || 'Refresh All gagal');
     } finally {
       setCampaignBackfilling(false);
     }
@@ -403,6 +383,8 @@ export default function AdminPage() {
   const [runningTakenAt, setRunningTakenAt] = useState(false);
   const [takenAtResult, setTakenAtResult] = useState<any>(null);
   const [takenAtPlatform, setTakenAtPlatform] = useState<'instagram' | 'tiktok' | 'all'>('instagram');
+  const [runningAccrual, setRunningAccrual] = useState(false);
+  const [accrualDays, setAccrualDays] = useState<number>(60);
   
   const runTakenAtBackfill = async () => {
     if (!confirm(`Backfill taken_at untuk ${takenAtPlatform === 'all' ? 'Instagram & TikTok' : takenAtPlatform}?\nProses bisa memakan waktu 5-10 menit.`)) return;
@@ -428,12 +410,26 @@ export default function AdminPage() {
     }
   };
 
+  const runAccrualBackfill = async () => {
+    if (!confirm(`Backfill accrual ${accrualDays} hari ke belakang?
+Ini akan menulis snapshot harian ke social_metrics_history.`)) return;
+    setRunningAccrual(true);
+    try {
+      const res = await fetch('/api/backfill/accrual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: accrualDays })
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Backfill accrual gagal');
+      alert(`✅ Backfill accrual selesai!\n\nInserted: ${j.inserted || j.updated || 0}\nRange: ${j?.range ? `${j.range.start} s/d ${j.range.end}` : ''}`);
+    } catch (e:any) {
+      alert('Error: ' + (e?.message || 'Backfill accrual gagal'));
+    } finally { setRunningAccrual(false); }
+  };
+
   const runTikTokBatch = async (continueSession = false, customOffset?: number) => {
-    if (!activeCampaignId) {
-      alert('Tidak ada campaign aktif');
-      return;
-    }
-    
+    // Selalu gunakan admin/tiktok/refresh-all agar alurnya identik dengan Instagram
     setRefreshingTikTok(true);
     setShowTikTokContinueDialog(false);
     
@@ -447,7 +443,7 @@ export default function AdminPage() {
     try {
       // CRITICAL: Use customOffset from auto-continue to avoid React state async issue
       const currentOffset = customOffset !== undefined ? customOffset : (continueSession ? tikTokOffset : 0);
-      console.log('[TikTok Refresh] Starting refresh for campaign:', activeCampaignId);
+      console.log('[TikTok Refresh] Starting refresh-all (campaign-agnostic)');
       console.log('[TikTok Refresh] Using offset:', currentOffset);
       console.log('[TikTok Refresh] Auto mode:', autoTikTokMode ? 'ENABLED (will process ALL batches)' : 'DISABLED (single batch)');
       
@@ -554,19 +550,42 @@ export default function AdminPage() {
             <span className="text-lg">📅</span>
             <span className="font-medium">{runningTakenAt ? 'Processing...' : 'Backfill Taken At'}</span>
           </button>
-          {/* Manual TikTok refresh hidden per request */}
-          <button 
-            onClick={() => {
-              setAutoTikTokMode(true); // AUTO MODE - NO STOP!
-              runTikTokBatch(false);
-            }} 
-            disabled={refreshingTikTok}
-            className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-green-600 text-white shadow-lg hover:shadow-xl transition-all disabled:opacity-50 animate-pulse"
-            title="AUTO MODE: Refresh semua akun tanpa henti sampai selesai!"
-          >
-            <span className="text-lg">🚀</span>
-            <span className="font-medium">{autoTikTokMode ? '⚡ AUTO RUNNING...' : '⚡ AUTO ALL'}</span>
-          </button>
+          {/* Backfill accrual snapshots */}
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={7}
+              max={180}
+              value={accrualDays}
+              onChange={(e)=> setAccrualDays(Math.max(7, Math.min(180, Number(e.target.value||60))))}
+              className="w-20 rounded-lg px-3 py-2 bg-gray-800 text-white border border-white/20 text-sm"
+              title="Jumlah hari backfill accrual"
+            />
+            <button
+              onClick={runAccrualBackfill}
+              disabled={runningAccrual || refreshingTikTok || refreshingIG}
+              className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 text-white shadow-lg hover:shadow-xl transition-all border border-white/10 disabled:opacity-50"
+              title="Backfill snapshot accrual ke social_metrics_history"
+            >
+              <span className="text-lg">🧮</span>
+              <span className="font-medium">{runningAccrual ? 'Backfilling…' : 'Backfill Accrual'}</span>
+            </button>
+          </div>
+          {/* TikTok refresh controls */}
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => {
+                setAutoTikTokMode(true); // AUTO MODE - NO STOP!
+                runTikTokBatch(false);
+              }} 
+              disabled={refreshingTikTok}
+              className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-green-600 text-white shadow-lg hover:shadow-xl transition-all disabled:opacity-50 animate-pulse"
+              title="AUTO MODE: Refresh semua akun tanpa henti sampai selesai!"
+            >
+              <span className="text-lg">🚀</span>
+              <span className="font-medium">{autoTikTokMode ? '⚡ AUTO RUNNING...' : '⚡ AUTO ALL'}</span>
+            </button>
+          </div>
           {/* Manual Instagram refresh hidden per request */}
           <button 
             onClick={() => {
@@ -631,13 +650,33 @@ export default function AdminPage() {
           )}
           {tikTokProgress && tikTokProgress.current > 0 && (
             <div className="glass rounded-xl border border-gray-500/30 p-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <span className="text-2xl">🎵</span>
                   <h3 className="font-semibold text-white">TikTok Progress</h3>
                 </div>
-                <span className="text-lg font-bold text-green-400">✅ {tikTokProgress.success} akun</span>
+                <span className="text-sm text-white/70">{tikTokProgress.current} akun diproses</span>
               </div>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-2">
+                  <div className="text-xs text-green-300/70">Berhasil</div>
+                  <div className="text-xl font-bold text-green-400">{tikTokProgress.success}</div>
+                </div>
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2">
+                  <div className="text-xs text-red-300/70">Gagal</div>
+                  <div className="text-xl font-bold text-red-400">{tikTokProgress.failed}</div>
+                </div>
+                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-2">
+                  <div className="text-xs text-blue-300/70">Total</div>
+                  <div className="text-xl font-bold text-blue-400">{tikTokProgress.total}</div>
+                </div>
+              </div>
+              {tikTokResults && (
+                <div className="text-xs text-white/60 space-y-1">
+                  <div>📊 Posts: {tikTokResults.total_posts_inserted?.toLocaleString?.() || tikTokResults.total_posts_inserted} | Views: {tikTokResults.total_views?.toLocaleString?.() || tikTokResults.total_views} | Likes: {tikTokResults.total_likes?.toLocaleString?.() || tikTokResults.total_likes}</div>
+                  <div>⚡ Avg: {tikTokResults.avg_duration_ms}ms/akun</div>
+                </div>
+              )}
             </div>
           )}
           {resolveMsg && (

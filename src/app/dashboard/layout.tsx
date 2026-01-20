@@ -119,17 +119,11 @@ export default function DashboardLayout({
                       <span className="text-sm font-medium">Admin</span>
                     </Link>
                   )}
-                  {(
-                    user.role === 'admin' ||
-                    user.role === 'super_admin' ||
-                    user.role === 'leader' ||
-                    user.role === 'karyawan'
-                  ) && (
-                    <Link href="/dashboard/groups" className="flex items-center gap-2 px-3 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/5 transition">
-                      <FiTrendingUp size={18} />
-                      <span className="text-sm font-medium">Groups</span>
-                    </Link>
-                  )}
+                  {/* Groups removed */}
+                  {/* <Link href="/dashboard/groups" className="flex items-center gap-2 px-3 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/5 transition">
+                    <FiTrendingUp size={18} />
+                    <span className="text-sm font-medium">Groups</span>
+                  </Link> */}
                   <Link href="/dashboard/account" className="flex items-center gap-2 px-3 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/5 transition">
                     <FiSettings size={18} />
                     <span className="text-sm font-medium">Akun</span>
@@ -182,17 +176,7 @@ export default function DashboardLayout({
                       <span className="text-sm font-medium">Admin</span>
                     </Link>
                   )}
-                  {(
-                    user.role === 'admin' ||
-                    user.role === 'super_admin' ||
-                    user.role === 'leader' ||
-                    user.role === 'karyawan'
-                  ) && (
-                    <Link href="/dashboard/groups" onClick={()=>setMenuOpen(false)} className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/5 transition text-center w-full">
-                      <FiTrendingUp size={18} />
-                      <span className="text-sm font-medium">Groups</span>
-                    </Link>
-                  )}
+                  {/* Groups removed in mobile menu */}
                   <Link href="/dashboard/account" onClick={()=>setMenuOpen(false)} className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/5 transition text-center w-full">
                     <FiSettings size={18} />
                     <span className="text-sm font-medium">Akun</span>

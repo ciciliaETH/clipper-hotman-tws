@@ -106,27 +106,15 @@ export default function AnalyticsPage() {
       const effEnd = mode==='accrual' ? todayStr : end;
       u.searchParams.set('start', effStart); u.searchParams.set('end', effEnd);
       u.searchParams.set('interval', interval); u.searchParams.set('mode', mode); u.searchParams.set('cutoff', accrualCutoff);
+      if (mode==='accrual') u.searchParams.set('strict','1');
       const r = await fetch(u.toString(), { cache:'no-store' });
       let j = await r.json();
       if (!r.ok) throw new Error(j?.error || 'Gagal memuat data');
 
-      // Jika semua nilai nol (tidak ada akun/riwayat), fallback ke /api/groups/series agar identik dengan Dashboard
-      const sumAll = (()=>{
-        try { return (j?.series||[]).reduce((A:number, s:any)=> A + (s.series||[]).reduce((a:number,p:any)=> a + Number(p.views||0) + Number(p.likes||0) + Number(p.comments||0), 0), 0); } catch { return 0; }
-      })();
-      if (!sumAll) {
-        const g = new URL('/api/groups/series', window.location.origin);
-        g.searchParams.set('start', effStart); g.searchParams.set('end', effEnd); g.searchParams.set('interval', interval); g.searchParams.set('mode', mode);
-        const gr = await fetch(g.toString(), { cache:'no-store' });
-        const gj = await gr.json();
-        if (gr.ok) {
-          // Bentuk data.series seperti analytics: dua entry (tiktok, instagram) + biarkan chart agregasi Total sendiri
-          const toSeries = (arr:any[])=> (arr||[]).map((s:any)=> ({ date:String(s.date), views:Number(s.views||0), likes:Number(s.likes||0), comments:Number(s.comments||0), shares:Number(s.shares||0)||0, saves:Number(s.saves||0)||0 }));
-          j = { ...j, series: [
-            { key: 'tiktok:__dashboard__', series: toSeries(gj.total_tiktok||[]) },
-            { key: 'instagram:__dashboard__', series: toSeries(gj.total_instagram||[]) }
-          ] };
-        }
+      // HAPUS fallback: Jika mode accrual dan history kosong, biarkan kosong (jangan isi dari posts_daily)
+      // Pastikan tidak ada artefak field groups/total dari request sebelumnya yang bisa dipakai Weekly View
+      if (mode==='accrual') {
+        j = { ...j, groups: [], total: [], total_tiktok: [], total_instagram: [], totals: undefined } as any;
       }
       setData(j);
     } catch {}

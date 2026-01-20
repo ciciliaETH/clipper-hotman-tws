@@ -465,6 +465,7 @@ export async function GET(request: Request, context: any) {
   const endBound = endParam ? new Date(endParam + 'T23:59:59.999Z') : null;
   const allParam = urlObj.searchParams.get('all');
   const countParam = urlObj.searchParams.get('count');
+  const aggregatorOnly = urlObj.searchParams.get('aggregator_only') === '1';
 
   // Ensure user exists
   let { data: userData } = await admin
@@ -545,8 +546,8 @@ export async function GET(request: Request, context: any) {
     }
   }
   
-  // PRIORITY 2: Fallback to RapidAPI if Aggregator failed or forced
-  if (videos.length === 0 || rapidParam === '1') {
+  // PRIORITY 2: Fallback to RapidAPI if Aggregator failed or forced (skip when aggregatorOnly)
+  if (!aggregatorOnly && (videos.length === 0 || rapidParam === '1')) {
     if (rapidParam === '1') {
       console.log(`[TikTok Fetch] RapidAPI forced via ?rapid=1`);
     }
@@ -1072,7 +1073,7 @@ export async function GET(request: Request, context: any) {
     }
     
     // FALLBACK TO RAPIDAPI IF NEEDED
-    const useRapidCursor = FORCE_RAPID || videos.length === 0;
+    const useRapidCursor = !aggregatorOnly && (FORCE_RAPID || videos.length === 0);
     const providerOverride = providerParam === 'api15' || providerParam === 'fast' ? providerParam : undefined;
     
     if (useRapidCursor) {
@@ -1115,7 +1116,9 @@ export async function GET(request: Request, context: any) {
     console.log(`[TikTok Fetch] Final result: ${videos.length} videos from ${telemetry?.mode || 'rapidapi'}`);
     
     // VIDEO ENRICHMENT - Backfill missing stats from tikwm.com
+    // Skip enrichment if aggregatorOnly to avoid external calls
     videos = await Promise.all(videos.map(async (v: any) => {
+      if (aggregatorOnly) return v;
       const coreCount = readStat(v,'play') || readStat(v,'digg') || readStat(v,'comment');
       const vid = v.aweme_id || v.video_id || deriveVideoId(v);
       const hasCore = coreCount > 0 && !!vid;
@@ -1191,31 +1194,89 @@ export async function GET(request: Request, context: any) {
       }
     }
 
-    // Fetch user followers count from RapidAPI
+    // Fetch user followers count from RapidAPI (skip when aggregatorOnly)
     let followers = 0;
-    try {
-      const infoUrl = `https://${TIKTOK_RAPID_HOST}/user/info?unique_id=@${encodeURIComponent(normalized)}`;
-      const infoData = await rapidApiRequest({ url: infoUrl, method: 'GET', rapidApiHost: TIKTOK_RAPID_HOST, timeoutMs: 15000 });
-      followers = Number(infoData?.data?.stats?.followerCount || infoData?.userInfo?.stats?.followerCount || 0) || 0;
-    } catch (err) {
-      console.error('[fetch-metrics] Failed to fetch follower count from RapidAPI:', err);
-    }
-
-    let tiktokData: any = { ...totals, followers };
-    if (startBound && endBound) {
-      const { data: aggRows } = await admin.from('tiktok_posts_daily').select('play_count, digg_count, comment_count, share_count, save_count, post_date').eq('username', normalized).gte('post_date', startParam!).lte('post_date', endParam!);
-      if ((aggRows?.length || 0) > 0) {
-        const acc = { views: 0, likes: 0, comments: 0, shares: 0, saves: 0 } as any;
-        for (const r of aggRows || []) { acc.views += safeParseInt(r.play_count); acc.likes += safeParseInt(r.digg_count); acc.comments += safeParseInt(r.comment_count); acc.shares += safeParseInt(r.share_count); acc.saves += safeParseInt(r.save_count); }
-        tiktokData = { ...totals, ...acc, posts_total: (aggRows || []).length, followers };
+    if (!aggregatorOnly) {
+      try {
+        const infoUrl = `https://${TIKTOK_RAPID_HOST}/user/info?unique_id=@${encodeURIComponent(normalized)}`;
+        const infoData = await rapidApiRequest({ url: infoUrl, method: 'GET', rapidApiHost: TIKTOK_RAPID_HOST, timeoutMs: 15000 });
+        followers = Number(infoData?.data?.stats?.followerCount || infoData?.userInfo?.stats?.followerCount || 0) || 0;
+      } catch (err) {
+        console.error('[fetch-metrics] Failed to fetch follower count from RapidAPI:', err);
       }
     }
+
+    // LIFETIME TOTALS for accrual snapshots: SUM directly in DB across ALL known handles for this user
+    let tiktokData: any = { ...totals, followers };
+    try {
+      const handleSet = new Set<string>([normalized]);
+      try {
+        const { data: extra } = await admin
+          .from('user_tiktok_usernames')
+          .select('tiktok_username')
+          .eq('user_id', userId);
+        for (const r of extra||[]) {
+          const h = String((r as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase();
+          if (h) handleSet.add(h);
+        }
+      } catch {}
+      const handles = Array.from(handleSet);
+      const { data: sumRow } = await admin
+        .from('tiktok_posts_daily')
+        .select('views:sum(play_count),likes:sum(digg_count),comments:sum(comment_count),shares:sum(share_count),saves:sum(save_count),posts_total:count(video_id)')
+        .in('username', handles)
+        .single();
+      if (sumRow) {
+        const acc = {
+          views: Number((sumRow as any)?.views||0) || 0,
+          likes: Number((sumRow as any)?.likes||0) || 0,
+          comments: Number((sumRow as any)?.comments||0) || 0,
+          shares: Number((sumRow as any)?.shares||0) || 0,
+          saves: Number((sumRow as any)?.saves||0) || 0,
+        } as any;
+        const posts_total = Number((sumRow as any)?.posts_total||0) || 0;
+        // Only override if DB actually has rows; otherwise keep computed totals
+        if (posts_total > 0 || acc.views + acc.likes + acc.comments + acc.shares + acc.saves > 0) {
+          tiktokData = { ...tiktokData, ...acc, posts_total };
+        } else {
+          tiktokData = { ...tiktokData, posts_total: tiktokData.posts_total ?? videos.length };
+        }
+      }
+    } catch {}
 
     // Save summary metrics (social_metrics) and history
     await admin.from('social_metrics').upsert({ user_id: userId, platform: 'tiktok', followers, likes: tiktokData.likes, views: tiktokData.views, comments: tiktokData.comments, shares: tiktokData.shares, saves: tiktokData.saves, last_updated: new Date().toISOString() }, { onConflict: 'user_id,platform' });
     try { await admin.from('social_metrics_history').insert({ user_id: userId, platform: 'tiktok', followers, likes: tiktokData.likes, views: tiktokData.views, comments: tiktokData.comments, shares: tiktokData.shares, saves: tiktokData.saves, captured_at: new Date().toISOString() }); } catch {}
 
-    return NextResponse.json({ tiktok: tiktokData, source: 'external', telemetry });
+    // Tambahkan insert untuk Instagram jika ada data Instagram
+    if (typeof request.url === 'string' && request.url.includes('platform=instagram')) {
+      // Cek apakah ada data Instagram yang sudah diakumulasi (misal: dari endpoint lain atau pipeline)
+      // Asumsi: Anda perlu menyesuaikan bagian ini jika sudah ada variabel instagramData atau sejenisnya
+      // Contoh minimal:
+      let instagramData = null;
+      try {
+        // Coba ambil data summary dari tabel social_metrics
+        const { data: igRow } = await admin.from('social_metrics').select('*').eq('user_id', userId).eq('platform', 'instagram').maybeSingle();
+        if (igRow) instagramData = igRow;
+      } catch {}
+      if (instagramData) {
+        try {
+          await admin.from('social_metrics_history').insert({
+            user_id: userId,
+            platform: 'instagram',
+            followers: instagramData.followers || 0,
+            likes: instagramData.likes || 0,
+            views: instagramData.views || 0,
+            comments: instagramData.comments || 0,
+            shares: instagramData.shares || 0,
+            saves: instagramData.saves || 0,
+            captured_at: new Date().toISOString(),
+          });
+        } catch {}
+      }
+    }
+
+    return NextResponse.json({ tiktok: tiktokData, source: videos.length > 0 ? (telemetry?.mode || 'aggregator') : 'aggregator', telemetry });
   } catch (error) {
     console.error('fetch-metrics error', error);
     return NextResponse.json({ error: 'An internal server error occurred.' }, { status: 500 });

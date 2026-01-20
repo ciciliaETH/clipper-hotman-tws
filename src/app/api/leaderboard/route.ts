@@ -390,7 +390,57 @@ export async function GET(req: Request) {
       }
     }
 
-    if (!campaignId) return NextResponse.json({ error: 'No active campaign found' }, { status: 400 });
+    if (!campaignId) {
+      // Fallback: Global employee leaderboard without campaign
+      const endISO = new Date().toISOString().slice(0,10);
+      const windowDays = Number(url.searchParams.get('days') || '7');
+      const startISO = (()=>{ const d=new Date(); d.setUTCDate(d.getUTCDate()-(windowDays-1)); return d.toISOString().slice(0,10) })();
+      // Collect all employees
+      const { data: users } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name, username')
+        .in('role', ['karyawan','leader','umum','admin','super_admin']);
+      const empIds = (users||[]).map((u:any)=> String(u.id));
+      if (!empIds.length) return NextResponse.json({ top, start: startISO, end: endISO, data: [], scope: 'employees' });
+      const prev = new Date(startISO+'T00:00:00Z'); prev.setUTCDate(prev.getUTCDate()-1); const prevISO = prev.toISOString().slice(0,10);
+      const { data: hist } = await supabaseAdmin
+        .from('social_metrics_history')
+        .select('user_id, platform, views, likes, comments, shares, saves, captured_at')
+        .in('user_id', empIds)
+        .gte('captured_at', prevISO+'T00:00:00Z')
+        .lte('captured_at', endISO+'T23:59:59Z')
+        .order('user_id',{ascending:true}).order('captured_at',{ascending:true});
+      const byUser = new Map<string, any[]>();
+      for (const r of hist||[]) {
+        const uid = String((r as any).user_id); const arr = byUser.get(uid) || []; arr.push(r); byUser.set(uid, arr);
+      }
+      const totals = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
+      for (const [uid, arr] of byUser.entries()) {
+        let prevRow:any = null;
+        for (const r of arr) {
+          const date = String((r as any).captured_at).slice(0,10);
+          if (!prevRow) { if (date>=startISO && date<=endISO) {
+              const cur = totals.get(uid)||{views:0,likes:0,comments:0,shares:0,saves:0};
+              cur.views += Number((r as any).views)||0; cur.likes += Number((r as any).likes)||0; cur.comments += Number((r as any).comments)||0; cur.shares += Number((r as any).shares)||0; cur.saves += Number((r as any).saves)||0; totals.set(uid, cur);
+            } prevRow=r; continue; }
+          if (date>=startISO && date<=endISO) {
+            const cur = totals.get(uid)||{views:0,likes:0,comments:0,shares:0,saves:0};
+            cur.views += Math.max(0, Number((r as any).views||0)-Number((prevRow as any).views||0));
+            cur.likes += Math.max(0, Number((r as any).likes||0)-Number((prevRow as any).likes||0));
+            cur.comments += Math.max(0, Number((r as any).comments||0)-Number((prevRow as any).comments||0));
+            cur.shares += Math.max(0, Number((r as any).shares||0)-Number((prevRow as any).shares||0));
+            cur.saves += Math.max(0, Number((r as any).saves||0)-Number((prevRow as any).saves||0));
+            totals.set(uid, cur);
+          }
+          prevRow = r;
+        }
+      }
+      const nameMap = new Map<string,string>();
+      for (const u of users||[]) nameMap.set(String((u as any).id), String((u as any).full_name || (u as any).username || (u as any).id));
+      const data = Array.from(totals.entries()).map(([uid,v])=>({ username: nameMap.get(uid)||uid, views:v.views, likes:v.likes, comments:v.comments, shares:v.shares, saves:v.saves, total: v.views+v.likes+v.comments+v.shares+v.saves })).sort((a,b)=> b.total-a.total);
+      const limited = top ? data.slice(0, top) : data;
+      return NextResponse.json({ top, start: startISO, end: endISO, data: limited, scope:'employees' });
+    }
 
     // If campaign start/end still empty (because campaignId supplied by query), fetch window
     if (!campaignStart) {

@@ -25,6 +25,8 @@ export async function GET(req: Request, context: any) {
   const supa = admin();
   const upserts: any[] = [];
   let source = 'reels:user_id';
+  // PATCH: Track aggregator totals for fallback dummy row
+  let aggregatorTotals = { views: 0, likes: 0, comments: 0 };
   
   try {
     let userId = await resolveUserIdViaLink(norm, supa);
@@ -56,6 +58,13 @@ export async function GET(req: Request, context: any) {
       } catch {}
 
       const results = await fetchAllProviders(userId);
+      // PATCH: If aggregator present, track totals
+      const aggregatorResult = results.find(r => r.source === 'aggregator');
+      if (aggregatorResult) {
+        aggregatorTotals.views = Number(aggregatorResult.views || aggregatorResult.total_views || 0);
+        aggregatorTotals.likes = Number(aggregatorResult.likes || aggregatorResult.total_likes || 0);
+        aggregatorTotals.comments = Number(aggregatorResult.comments || aggregatorResult.total_comments || 0);
+      }
       const scraperResult = results.find(r => r.source === 'scraper' && r.items.length > 0);
       const anySuccessful = results.find(r => r.items.length > 0);
       const bestResult = scraperResult || anySuccessful;
@@ -349,12 +358,42 @@ export async function GET(req: Request, context: any) {
       }
     }
 
+    // PATCH: If upserts is empty, use aggregatorTotals
     const totals = upserts.reduce((a, r)=>({
-      views: a.views + (r.play_count||0),
-      likes: a.likes + (r.like_count||0),
-      comments: a.comments + (r.comment_count||0),
+      views: a.views + (r.play_count || 0),
+      likes: a.likes + (r.like_count || 0),
+      comments: a.comments + (r.comment_count || 0),
       posts_total: a.posts_total + 1,
-    }), { views:0, likes:0, comments:0, posts_total:0 });
+    }), { views: 0, likes: 0, comments: 0, posts_total: 0 });
+    if (upserts.length === 0 && (aggregatorTotals.views > 0 || aggregatorTotals.likes > 0 || aggregatorTotals.comments > 0)) {
+      totals.views = aggregatorTotals.views;
+      totals.likes = aggregatorTotals.likes;
+      totals.comments = aggregatorTotals.comments;
+      const today = new Date().toISOString().slice(0,10);
+      await supa.from('instagram_posts_daily').upsert([
+        {
+          id: `${norm}_force_${today}`,
+          username: norm,
+          post_date: today,
+          play_count: totals.views,
+          like_count: totals.likes,
+          comment_count: totals.comments
+        }
+      ], { onConflict: 'id' });
+    }
+
+    const totals = upserts.reduce((a, r)=>({
+      views: a.views + (r.play_count || 0),
+      likes: a.likes + (r.like_count || 0),
+      comments: a.comments + (r.comment_count || 0),
+      posts_total: a.posts_total + 1,
+    }), { views: 0, likes: 0, comments: 0, posts_total: 0 });
+    // PATCH: If upserts is empty, use aggregatorTotals
+    if (upserts.length === 0 && (aggregatorTotals.views > 0 || aggregatorTotals.likes > 0 || aggregatorTotals.comments > 0)) {
+      totals.views = aggregatorTotals.views;
+      totals.likes = aggregatorTotals.likes;
+      totals.comments = aggregatorTotals.comments;
+    }
 
     const allowCreateUser = (process.env.FETCH_IG_CREATE_USER === '1') || (url.searchParams.get('create') === '1');
     let ownerUserId: string | null = null;

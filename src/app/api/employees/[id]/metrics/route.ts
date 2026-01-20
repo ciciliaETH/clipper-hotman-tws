@@ -534,41 +534,8 @@ export async function GET(req: Request, context: any) {
     }
     seriesTikTok = alignedTT; seriesInstagram = alignedIG; series = merged;
 
-    // Load historical metrics if available
+    // Historical disabled: always empty
     let historical: any[] = [];
-    try {
-      const { data: histData } = await supabase
-        .from('employee_historical_metrics')
-        .select('*')
-        .eq('employee_id', id)
-        .order('start_date', { ascending: true });
-      
-      if (histData && histData.length > 0) {
-        // Filter by campaign if specified
-        let filtered = histData;
-        if (campaignId) {
-          filtered = histData.filter((h: any) => 
-            h.campaign_id === campaignId || h.campaign_id === null
-          );
-        }
-        
-        // Transform to series format with period label
-        historical = filtered.map((h: any) => ({
-          start_date: h.start_date,
-          end_date: h.end_date,
-          period_label: `${new Date(h.start_date).toLocaleDateString('id-ID')} - ${new Date(h.end_date).toLocaleDateString('id-ID')}`,
-          platform: h.platform,
-          views: Number(h.views) || 0,
-          likes: Number(h.likes) || 0,
-          comments: Number(h.comments) || 0,
-          shares: Number(h.shares) || 0,
-          saves: Number(h.saves) || 0,
-          is_historical: true
-        }));
-      }
-    } catch (e) {
-      console.error('Error loading historical metrics:', e);
-    }
 
     const totals = {
       views: (totalsTikTok.views||0)+(totalsInstagram.views||0),

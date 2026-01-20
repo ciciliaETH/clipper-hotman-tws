@@ -30,6 +30,31 @@ function admin() {
   return createAdmin(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 }
 
+// Helper: Try to get taken_at from Aggregator by shortcode (no RapidAPI)
+async function aggFetchTakenAtViaCode(code: string): Promise<number | null> {
+  if (!code || !AGG_BASE) return null;
+  const candidates = [
+    `${AGG_BASE}/instagram/post?code=${encodeURIComponent(code)}`,
+    `${AGG_BASE}/instagram/media?code=${encodeURIComponent(code)}`,
+    `${AGG_BASE}/instagram/post_info?code=${encodeURIComponent(code)}`
+  ];
+  for (const url of candidates) {
+    try {
+      const controller = new AbortController();
+      const to = setTimeout(()=>controller.abort(), 8000);
+      const res = await fetch(url, { signal: controller.signal, headers: { 'Content-Type': 'application/json' } });
+      clearTimeout(to);
+      if (!res.ok) continue;
+      const j = await res.json().catch(()=>null);
+      if (!j) continue;
+      const it = j?.data?.item || j?.data?.media || j?.data || j?.item || j?.media || j;
+      const ts = parseMs(it?.taken_at) || parseMs(it?.takenAt) || parseMs(it?.timestamp) || parseMs(it?.created_at) || parseMs(it?.createdAt);
+      if (ts) return ts;
+    } catch {}
+  }
+  return null;
+}
+
 // Helper to fetch taken_at from RapidAPI media/shortcode_reels endpoint
 async function fetchTakenAt(code: string): Promise<number | null> {
   if (!code) return null;
@@ -72,6 +97,9 @@ export async function GET(req: Request, context: any) {
   const url = new URL(req.url);
   const cleanup = String(url.searchParams.get('cleanup')||'');
   const debug = url.searchParams.get('debug') === '1';
+  // New: When aggregator_only=1, do NOT use any RapidAPI fallback or detail calls.
+  // Only attempt aggregator + lightweight link resolution.
+  const aggregatorOnly = url.searchParams.get('aggregator_only') === '1';
   const allowUsernameFallback = (process.env.FETCH_IG_ALLOW_USERNAME_FALLBACK === '1') || (url.searchParams.get('allow_username') === '1');
   // Optional tuning via query params
   const qpMaxPages = Number(url.searchParams.get('max_pages') || '') || undefined;
@@ -86,6 +114,41 @@ export async function GET(req: Request, context: any) {
   let source = 'aggregator';
   let fetchTelemetry: any = null;
   
+  // Helper: resilient upsert into instagram_posts_daily even if some columns are missing
+  async function safeUpsert(items: any[]) {
+    if (!items || !items.length) return { inserted: 0, retried: false } as any;
+    // Cek dan isi taken_at jika null/undefined dengan value lama dari DB
+    const itemsToUpsert = await Promise.all(items.map(async (it) => {
+      if (it.taken_at === null || it.taken_at === undefined) {
+        // Ambil taken_at lama dari DB jika ada
+        const { data: old } = await supa.from('instagram_posts_daily').select('taken_at').eq('id', it.id).maybeSingle();
+        if (old && old.taken_at) {
+          return { ...it, taken_at: old.taken_at };
+        }
+      }
+      return it;
+    }));
+    try {
+      const { error: upErr } = await supa.from('instagram_posts_daily').upsert(itemsToUpsert, { onConflict: 'id' });
+      if (upErr) throw upErr;
+      return { inserted: itemsToUpsert.length, retried: false };
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const needStrip: string[] = [];
+      if (msg.includes('caption')) needStrip.push('caption');
+      if (msg.includes('code')) needStrip.push('code');
+      if (!needStrip.length) throw e; // Unknown error, bubble up
+      const stripped = itemsToUpsert.map((it)=>{
+        const cp = { ...it } as any;
+        for (const k of needStrip) delete cp[k];
+        return cp;
+      });
+      const { error: upErr2 } = await supa.from('instagram_posts_daily').upsert(stripped, { onConflict: 'id' });
+      if (upErr2) throw upErr2;
+      return { inserted: stripped.length, retried: true, stripped: needStrip };
+    }
+  }
+  
   try {
     // ============================================
     // STEP 1: Try AGGREGATOR FIRST (UNLIMITED PAGINATION)
@@ -97,21 +160,37 @@ export async function GET(req: Request, context: any) {
         const startTs = Date.now();
         const allReels: any[] = [];
         const seenIds = new Set<string>();
+        // Aggregate counters regardless of timestamp availability
+        let aggViews = 0;
+        let aggLikes = 0;
+        let aggComments = 0;
         let currentCursor: string | null = null;
         let pageNum = 0;
         let consecutiveSameCursor = 0;
         let lastCursor: string | null = null;
 
-        // Try to prefetch shortcode->timestamp map via public page scraping
+        // Prefetch shortcode->timestamp via public links only when RapidAPI allowed
         const linksMap = new Map<string, number>();
-        try {
-          const linksArr = await fetchLinksData(`https://www.instagram.com/${norm}/reels/`);
-          for (const it of linksArr) {
-            const sc = String(it?.shortcode || it?.meta?.shortcode || '');
-            const ts = parseMs(it?.takenAt || it?.meta?.takenAt);
-            if (sc && ts) linksMap.set(sc, ts);
-          }
-        } catch {}
+        if (!aggregatorOnly) {
+          try {
+            const pages = [
+              `https://www.instagram.com/${norm}/reels/`,
+              `https://www.instagram.com/${norm}/reels`,
+              `https://www.instagram.com/${norm}/`
+            ];
+            for (const p of pages) {
+              try {
+                const linksArr = await fetchLinksData(p);
+                for (const it of linksArr) {
+                  const sc = String(it?.shortcode || it?.meta?.shortcode || '');
+                  const ts = parseMs(it?.takenAt || it?.meta?.takenAt);
+                  if (sc && ts && !linksMap.has(sc)) linksMap.set(sc, ts);
+                }
+              } catch {}
+              if (linksMap.size >= 20) break;
+            }
+          } catch {}
+        }
         
         // Try to pre-resolve user_id for aggregator (improves hit rate)
         let aggUserId: string | null = null;
@@ -124,7 +203,7 @@ export async function GET(req: Request, context: any) {
           if ((row as any)?.instagram_user_id) aggUserId = String((row as any).instagram_user_id);
         } catch {}
         if (!aggUserId) {
-          try { aggUserId = await resolveUserIdViaLink(norm, admin()); } catch {}
+          try { aggUserId = (await resolveUserIdViaLink(norm, admin())) || null; } catch {}
         }
 
         // Unlimited pagination loop
@@ -184,7 +263,8 @@ export async function GET(req: Request, context: any) {
             newReelsCount++;
 
             const code = String(media?.code || '');
-            // Derive post_date: prefer exact timestamp from media.taken_at, then linksMap, then RapidAPI, then resolveTimestamp; fallback to today
+            // Derive post_date: prefer exact timestamp from media.taken_at, then linksMap,
+            // then (if NOT aggregatorOnly) RapidAPI shortcode detail, then resolveTimestamp
             let ms: number | null = null;
             // Try to get taken_at directly from media object first (most reliable)
             const takenAt = media?.taken_at || media?.taken_at_timestamp || node?.taken_at || node?.taken_at_timestamp;
@@ -192,32 +272,50 @@ export async function GET(req: Request, context: any) {
               ms = parseMs(takenAt);
             }
             if (!ms && code && linksMap.has(code)) ms = linksMap.get(code)!;
-            // Aggregator doesn't return taken_at, so fetch it from RapidAPI
+            // Aggregator doesn't always return taken_at
             if (!ms && code) {
-              ms = await fetchTakenAt(code);
+              if (aggregatorOnly) {
+                // Try aggregator detail endpoints (no RapidAPI)
+                ms = await aggFetchTakenAtViaCode(code);
+              } else {
+                // Use RapidAPI detail resolver
+                ms = await fetchTakenAt(code);
+              }
               if (ms && debug) console.log(`[IG Fetch] Fetched taken_at for ${code}: ${new Date(ms).toISOString()}`);
             }
-            if (!ms) {
+            if (!ms && !aggregatorOnly) {
               const resolved = await resolveTimestamp(media, node, IG_HOST);
               if (resolved) ms = resolved;
             }
-            const post_date = ms ? new Date(ms).toISOString().slice(0,10) : new Date().toISOString().slice(0, 10);
-            const taken_at = ms ? new Date(ms).toISOString() : null; // Store actual timestamp
-            const caption = extractCaption(media, node);
+            // Aggregate counts regardless of timestamp availability
             const play = Number(media?.play_count ?? media?.view_count ?? media?.video_view_count ?? 0) || 0;
             const like = Number(media?.like_count ?? 0) || 0;
             const comment = Number(media?.comment_count ?? 0) || 0;
+            aggViews += play; aggLikes += like; aggComments += comment;
 
-            allReels.push({ 
-              id: rawId, 
-              code: code || null, 
-              caption: caption || null, 
-              username: norm, 
+            // If we still don't have timestamp, skip upsert (avoid wrong post_date)
+            let post_date: string;
+            let taken_at: string | null = null;
+            if (ms) {
+              post_date = new Date(ms).toISOString().slice(0,10);
+              taken_at = new Date(ms).toISOString();
+            } else {
+              // Jika tidak ada timestamp, gunakan current_date
+              post_date = new Date().toISOString().slice(0,10);
+              taken_at = null;
+            }
+            const caption = extractCaption(media, node);
+
+            allReels.push({
+              id: rawId,
+              code: code || null,
+              caption: caption || null,
+              username: norm,
               post_date,
-              taken_at, // Include actual timestamp if available
-              play_count: play, 
-              like_count: like, 
-              comment_count: comment 
+              taken_at,
+              play_count: play,
+              like_count: like,
+              comment_count: comment
             });
           }
           
@@ -265,14 +363,11 @@ export async function GET(req: Request, context: any) {
             success: true
           };
           
-          // Save to database
+          // Save to database (resilient to missing optional columns)
           if (upserts.length > 0) {
-            // Use the actual unique constraint for this table: id
-            // Using an invalid conflict target (e.g. 'id,post_date') causes silent failures
-            // where Supabase returns { error } but we didn't check it before.
-            const { error: upErr } = await supa.from('instagram_posts_daily').upsert(upserts, { onConflict: 'id' });
-            if (upErr) {
-              console.warn('[IG Fetch] upsert instagram_posts_daily failed:', upErr.message);
+            const res = await safeUpsert(upserts);
+            if (res?.retried) {
+              console.warn('[IG Fetch] Upsert retried without columns:', res.stripped);
             }
             const totalViews = upserts.reduce((s, u) => s + (Number(u.play_count) || 0), 0);
             const totalLikes = upserts.reduce((s, u) => s + (Number(u.like_count) || 0), 0);
@@ -281,7 +376,7 @@ export async function GET(req: Request, context: any) {
               success: true, 
               source, 
               username: norm, 
-              inserted: upserts.length, 
+              inserted: res?.inserted || upserts.length, 
               total_views: totalViews,
               total_likes: totalLikes,
               total_comments: totalComments,
@@ -289,11 +384,18 @@ export async function GET(req: Request, context: any) {
             });
           }
         } else {
-          console.log(`[IG Fetch] ⚠️ Aggregator returned 0 reels after ${pageNum} pages, trying RapidAPI fallback...`);
+          console.log(`[IG Fetch] ⚠️ Aggregator returned 0 upsertable reels after ${pageNum} pages (totals: v=${aggViews}, l=${aggLikes}, c=${aggComments})`);
+          // If we have totals but no upserts (missing timestamps), expose totals for caller
+          fetchTelemetry = {
+            source: 'aggregator',
+            pagesProcessed: pageNum,
+            totals: { views: aggViews, likes: aggLikes, comments: aggComments },
+            success: aggViews + aggLikes + aggComments > 0
+          };
         }
       } catch (aggErr: any) {
         if (aggErr.name === 'AbortError') {
-          console.log(`[IG Fetch] ✗ Aggregator timeout, trying RapidAPI fallback...`);
+          console.log(`[IG Fetch] ✗ Aggregator timeout`);
         } else {
           console.warn(`[IG Fetch] ✗ Aggregator error:`, aggErr.message);
         }
@@ -303,6 +405,37 @@ export async function GET(req: Request, context: any) {
           success: false
         };
       }
+    }
+
+    // If caller requires aggregator-only, do not continue to RapidAPI fallbacks
+    if (aggregatorOnly) {
+      // In aggregator-only mode, succeed even if no upserts; return totals if available
+      const totalViews = upserts.reduce((s, u) => s + (Number(u.play_count) || 0), 0);
+      const totalLikes = upserts.reduce((s, u) => s + (Number(u.like_count) || 0), 0);
+      const totalComments = upserts.reduce((s, u) => s + (Number(u.comment_count) || 0), 0);
+      const fromTelemetry = (fetchTelemetry as any)?.totals || {};
+      const views = totalViews || Number(fromTelemetry.views || 0);
+      const likes = totalLikes || Number(fromTelemetry.likes || 0);
+      const comments = totalComments || Number(fromTelemetry.comments || 0);
+      if (views + likes + comments > 0 || upserts.length > 0) {
+        return NextResponse.json({ 
+          success: true, 
+          source: 'aggregator', 
+          username: norm, 
+          inserted: upserts.length, 
+          total_views: views,
+          total_likes: likes,
+          total_comments: comments,
+          telemetry: fetchTelemetry
+        });
+      }
+      return NextResponse.json({ 
+        error: 'aggregator_only_no_data', 
+        source: 'aggregator', 
+        username: norm,
+        inserted: 0,
+        telemetry: fetchTelemetry 
+      }, { status: 404 });
     }
 
     // ============================================
@@ -394,7 +527,7 @@ export async function GET(req: Request, context: any) {
             let comment = Number(media?.comment_count || 0) || 0;
             
             if ((play + like + comment) === 0) {
-              const counts = await resolveCounts(media, { id: pid, code });
+              const counts = await resolveCounts(media, { id: pid, code }, IG_HOST);
               if (counts) { play = counts.play; like = counts.like; comment = counts.comment; }
             }
             
@@ -422,7 +555,7 @@ export async function GET(req: Request, context: any) {
         let like = Number(m?.like || m?.like_count || 0) || 0;
         let comment = Number(m?.comment_count || 0) || 0;
         if ((play + like + comment) === 0) {
-          const counts = await resolveCounts({ id, code }, { id, code });
+          const counts = await resolveCounts({ id, code }, { id, code }, IG_HOST);
           if (counts) { play = counts.play; like = counts.like; comment = counts.comment; }
         }
         if ((play + like + comment) === 0) continue;
@@ -451,14 +584,14 @@ export async function GET(req: Request, context: any) {
       
       let ms = parseMs(media?.taken_at) || parseMs(media?.taken_at_ms) || parseMs(media?.device_timestamp) || parseMs(media?.timestamp) || parseMs(node?.taken_at) || parseMs(node?.caption?.created_at) || parseMs(node?.caption?.created_at_utc);
       
-      if (!ms) {
+        if (!ms) {
         const code = String(media?.code || node?.code || '');
         if (code && linksMap.has(code)) { 
           ms = linksMap.get(code)!; 
           telemetry.linkMatches += 1; 
         }
         if (!ms) {
-          ms = await resolveTimestamp(media, node);
+          ms = await resolveTimestamp(media, node, IG_HOST);
           if (ms) telemetry.detailResolves += 1;
         }
         if (!ms) { 
@@ -476,7 +609,7 @@ export async function GET(req: Request, context: any) {
       let comment = Number(media?.comment_count ?? media?.edge_media_to_comment?.count ?? 0) || 0;
       
       if ((play + like + comment) === 0) {
-        const fixed = await resolveCounts(media, node);
+        const fixed = await resolveCounts(media, node, IG_HOST);
         if (fixed) { 
           play = fixed.play; 
           like = fixed.like; 
@@ -511,7 +644,7 @@ export async function GET(req: Request, context: any) {
         let likes = Number(it?.likeCount || 0) || 0;
         let comments = Number(it?.commentCount || 0) || 0;
         if ((views + likes + comments) === 0) {
-          const counts = await resolveCounts({ code: sc }, { code: sc });
+          const counts = await resolveCounts({ code: sc }, { code: sc }, IG_HOST);
           if (counts) { 
             views = counts.play; 
             likes = counts.like; 
@@ -556,7 +689,7 @@ export async function GET(req: Request, context: any) {
             let likes = Number(m?.like_count || m?.edge_liked_by?.count || 0) || 0;
             let comments = Number(m?.comment_count || m?.edge_media_to_comment?.count || 0) || 0;
             if ((views + likes + comments) === 0) {
-              const counts = await resolveCounts({ code: sc }, { code: sc });
+              const counts = await resolveCounts({ code: sc }, { code: sc }, IG_HOST);
               if (counts) { 
                 views = counts.play; 
                 likes = counts.like; 
@@ -584,7 +717,7 @@ export async function GET(req: Request, context: any) {
           let likes = Number(it?.likeCount || 0) || 0;
           let comments = Number(it?.commentCount || 0) || 0;
           if ((views + likes + comments) === 0) {
-            const counts = await resolveCounts({ code: sc }, { code: sc });
+            const counts = await resolveCounts({ code: sc }, { code: sc }, IG_HOST);
             if (counts) { 
               views = counts.play; 
               likes = counts.like; 
@@ -618,7 +751,7 @@ export async function GET(req: Request, context: any) {
           let like = Number(it?.like_count ?? 0) || 0;
           let comment = Number(it?.comment_count ?? 0) || 0;
           if ((play + like + comment) === 0) {
-            const counts = await resolveCounts({ id, code: it?.code }, { id, code: it?.code });
+            const counts = await resolveCounts({ id, code: it?.code }, { id, code: it?.code }, IG_HOST);
             if (counts) { 
               play = counts.play; 
               like = counts.like; 
@@ -645,7 +778,7 @@ export async function GET(req: Request, context: any) {
       const chunk = 500;
       for (let i=0; i<upserts.length; i+=chunk) {
         const part = upserts.slice(i, i+chunk);
-        await supa.from('instagram_posts_daily').upsert(part, { onConflict: 'id' });
+        await safeUpsert(part);
       }
     }
 

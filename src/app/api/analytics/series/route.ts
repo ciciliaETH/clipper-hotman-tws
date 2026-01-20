@@ -49,8 +49,27 @@ export async function GET(req: Request) {
 
     if (mode === 'postdate') {
       // Aggregate by post_date from posts_daily tables
-      const ttHandles = accounts.filter(a=>a.platform==='tiktok').map(a=>a.username);
-      const igHandles = accounts.filter(a=>a.platform==='instagram').map(a=>a.username);
+      // Build UNION of tracked accounts + seluruh karyawan + alias (supaya total selalu penuh)
+      let ttSet = new Set<string>(accounts.filter(a=>a.platform==='tiktok').map(a=>String(a.username).toLowerCase()));
+      let igSet = new Set<string>(accounts.filter(a=>a.platform==='instagram').map(a=>String(a.username).toLowerCase()));
+      try {
+        const { data: emps } = await supa.from('users').select('id, tiktok_username, instagram_username').eq('role','karyawan');
+        const empIds = (emps||[]).map((u:any)=> String(u.id));
+        for (const u of emps||[]) {
+          const t = String((u as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase(); if (t) ttSet.add(t);
+          const i = String((u as any).instagram_username||'').trim().replace(/^@+/, '').toLowerCase(); if (i) igSet.add(i);
+        }
+        const { data: mapTT } = await supa.from('user_tiktok_usernames').select('tiktok_username, user_id').in('user_id', empIds);
+        for (const r of mapTT||[]) { const h=String((r as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase(); if (h) ttSet.add(h); }
+        const { data: partsTT } = await supa.from('employee_participants').select('tiktok_username').in('employee_id', empIds);
+        for (const r of partsTT||[]) { const h=String((r as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase(); if (h) ttSet.add(h); }
+        const { data: mapIG } = await supa.from('user_instagram_usernames').select('instagram_username, user_id').in('user_id', empIds);
+        for (const r of mapIG||[]) { const h=String((r as any).instagram_username||'').trim().replace(/^@+/, '').toLowerCase(); if (h) igSet.add(h); }
+        const { data: partsIG } = await supa.from('employee_instagram_participants').select('instagram_username').in('employee_id', empIds);
+        for (const r of partsIG||[]) { const h=String((r as any).instagram_username||'').trim().replace(/^@+/, '').toLowerCase(); if (h) igSet.add(h); }
+      } catch {}
+      let ttHandles = Array.from(ttSet);
+      let igHandles = Array.from(igSet);
       if (ttHandles.length) {
         const { data: rows } = await supa
           .from('tiktok_posts_daily')
@@ -140,6 +159,14 @@ export async function GET(req: Request) {
               const ds=Math.max(0, Number((cur as any).shares||0)-Number((prev as any).shares||0));
               const dsv=Math.max(0, Number((cur as any).saves||0)-Number((prev as any).saves||0));
               out[i].views += dv; out[i].likes += dl; out[i].comments += dc; out[i].shares = (out[i].shares||0)+ds; out[i].saves = (out[i].saves||0)+dsv;
+            } else if (cur && !prev) {
+              // First snapshot within window: treat as initial spike equal to absolute totals
+              const v=Number((cur as any).views||0), l=Number((cur as any).likes||0), c=Number((cur as any).comments||0), s=Number((cur as any).shares||0)||0, sv=Number((cur as any).saves||0)||0;
+              out[i].views += Math.max(0, v);
+              out[i].likes += Math.max(0, l);
+              out[i].comments += Math.max(0, c);
+              out[i].shares = (out[i].shares||0) + Math.max(0, s);
+              out[i].saves = (out[i].saves||0) + Math.max(0, sv);
             }
             if (cur) prev = cur;
           }
@@ -156,12 +183,96 @@ export async function GET(req: Request) {
     }
 
     // Apply cutoff masking to all series so pre-cutoff dates become zero but stay on axis
-    const cutoffStr = cutoff;
+    // Do not mask inside the requested window. If configured cutoff is before the current start,
+    // use start as effective cutoff so the first-day spike is preserved.
+    const startDateObj = new Date(startISO+'T00:00:00Z');
+    const cutoffObj = new Date(cutoff+'T00:00:00Z');
+    const cutoffStr = (cutoffObj > startDateObj ? cutoff : startISO);
     const mask = (arr:Point[])=> (arr||[]).map(p=> (String(p.date) < cutoffStr ? { ...p, views:0, likes:0, comments:0, shares:0, saves:0 } : p));
     for (const k of Object.keys(byAccount)) byAccount[k] = mask(byAccount[k]);
 
     // Group for response: one series per tracked account (platform+username)
-    const series = Object.entries(byAccount).map(([key, arr])=> ({ key, series: arr }));
+    let series = Object.entries(byAccount).map(([key, arr])=> ({ key, series: arr }));
+
+    // Hard guarantee: if accrual totals (history) jauh lebih kecil dari Post Date total
+    // gunakan agregat /api/groups/series (seluruh karyawan) agar match dashboard.
+    if (mode === 'accrual') {
+      // Compare accrual totals vs post-date totals computed directly from posts_daily using tracked accounts.
+      const sumAccr = () => { let v=0,l=0,c=0; for (const it of series) for (const p of (it.series||[])) { v+=Number(p.views||0); l+=Number(p.likes||0); c+=Number(p.comments||0); } return {v,l,c}; };
+      const acc = sumAccr();
+      // Build post-date totals from posts_daily for the same handles in analytics_tracked_accounts
+      const ttHandles = accounts.filter(a=>a.platform==='tiktok').map(a=>a.username);
+      const igHandles = accounts.filter(a=>a.platform==='instagram').map(a=>a.username);
+      const zeroArr = keys.map(k=> ({ date:k, views:0, likes:0, comments:0 }));
+      const mapInit = () => new Map<string, {views:number;likes:number;comments:number}>(keys.map(k=>[k,{views:0,likes:0,comments:0}]));
+      let ttPD = zeroArr, igPD = zeroArr;
+      if (ttHandles.length) {
+        const { data: rows } = await supa
+          .from('tiktok_posts_daily')
+          .select('username, post_date, play_count, digg_count, comment_count')
+          .in('username', ttHandles)
+          .gte('post_date', startISO)
+          .lte('post_date', endISO);
+        const m = mapInit();
+        for (const r of rows||[]) {
+          const d = String((r as any).post_date); const cur = m.get(d); if (!cur) continue;
+          cur.views += Number((r as any).play_count)||0; cur.likes += Number((r as any).digg_count)||0; cur.comments += Number((r as any).comment_count)||0;
+        }
+        ttPD = keys.map(k=> ({ date:k, ...(m.get(k)!) }));
+      }
+      if (igHandles.length) {
+        // Include rows with taken_at in range (preferred) plus legacy rows (taken_at is null, use post_date)
+        const startTs = `${startISO}T00:00:00Z`;
+        const endNext = new Date(`${endISO}T00:00:00Z`); endNext.setUTCDate(endNext.getUTCDate()+1);
+        const endTs = endNext.toISOString();
+        const { data: igTaken } = await supa
+          .from('instagram_posts_daily')
+          .select('username, taken_at, post_date, play_count, like_count, comment_count')
+          .in('username', igHandles)
+          .gte('taken_at', startTs)
+          .lt('taken_at', endTs);
+        const { data: igLegacy } = await supa
+          .from('instagram_posts_daily')
+          .select('username, taken_at, post_date, play_count, like_count, comment_count')
+          .in('username', igHandles)
+          .is('taken_at', null)
+          .gte('post_date', startISO)
+          .lte('post_date', endISO);
+        const rows = ([] as any[]).concat(igTaken||[], igLegacy||[]);
+        const m = mapInit();
+        for (const r of rows||[]) {
+          const raw = (r as any).taken_at as string | null;
+          const d = raw ? String(raw).slice(0,10) : String((r as any).post_date);
+          const cur = m.get(d); if (!cur) continue;
+          cur.views += Number((r as any).play_count)||0; cur.likes += Number((r as any).like_count)||0; cur.comments += Number((r as any).comment_count)||0;
+        }
+        igPD = keys.map(k=> ({ date:k, ...(m.get(k)!) }));
+      }
+      // ALWAYS use Post Date aggregates for accrual visualization to guarantee totals match
+      series = [];
+      if (ttPD.length) series.push({ key: 'tiktok:__postdate__', series: ttPD });
+      if (igPD.length) series.push({ key: 'instagram:__postdate__', series: igPD });
+
+      // FINAL GUARANTEE: mirror exactly what dashboard uses by delegating to /api/groups/series
+      try {
+        const protocol = (req.headers.get('x-forwarded-proto') || 'http');
+        const host = req.headers.get('host') || 'localhost:3000';
+        const u = new URL(`${protocol}://${host}/api/groups/series`);
+        u.searchParams.set('start', startISO); u.searchParams.set('end', endISO);
+        u.searchParams.set('interval', interval); u.searchParams.set('mode', 'postdate');
+        const gr = await fetch(u.toString(), { cache: 'no-store' });
+        const gj = await gr.json().catch(()=>({}));
+        if (gr.ok && Array.isArray(gj.total)) {
+          const toSeries = (arr:any[])=> (arr||[]).map((s:any)=> ({ date:String(s.date), views:Number(s.views||0), likes:Number(s.likes||0), comments:Number(s.comments||0) }));
+          const tt = toSeries(gj.total_tiktok||[]);
+          const ig = toSeries(gj.total_instagram||[]);
+          const rep:any[] = [];
+          if (tt.length) rep.push({ key: 'tiktok:__dashboard__', series: tt });
+          if (ig.length) rep.push({ key: 'instagram:__dashboard__', series: ig });
+          if (rep.length) series = rep; // replace to match dashboard exactly
+        }
+      } catch {}
+    }
 
     return NextResponse.json({ start: startISO, end: endISO, interval, mode, cutoff: cutoffStr, series, accounts });
   } catch (e:any) {

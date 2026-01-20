@@ -21,9 +21,10 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 export default function DashboardTotalPage() {
   const [interval, setIntervalVal] = useState<'daily'|'weekly'|'monthly'>('daily');
   const [metric, setMetric] = useState<'views'|'likes'|'comments'>('views');
-  const [start, setStart] = useState<string>(()=>{ const d=new Date(); const s=new Date(); s.setDate(d.getDate()-30); return s.toISOString().slice(0,10)});
+  // Set default start date to 13 January 2026
+  const [start, setStart] = useState<string>('2026-01-13');
   const [end, setEnd] = useState<string>(()=> new Date().toISOString().slice(0,10));
-  const [mode, setMode] = useState<'postdate'|'accrual'>('accrual');
+  const [mode, setMode] = useState<'postdate'|'accrual'>('postdate');
   const [accrualWindow, setAccrualWindow] = useState<7|28|60>(7);
   const [useCustomAccrualDates, setUseCustomAccrualDates] = useState<boolean>(true); // Changed to true
   const [accrualCustomStart, setAccrualCustomStart] = useState<string>(() => {
@@ -33,10 +34,16 @@ export default function DashboardTotalPage() {
   const [accrualCustomEnd, setAccrualCustomEnd] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [weeklyView, setWeeklyView] = useState<boolean>(true); // Changed to true
   const [platformFilter, setPlatformFilter] = useState<'all'|'tiktok'|'instagram'>('all');
-  const [showHistorical, setShowHistorical] = useState<boolean>(true); // Changed to true
+  const [showHistorical, setShowHistorical] = useState<boolean>(false);
   const [showPosts, setShowPosts] = useState<boolean>(true); // Show posts line on chart
   const [historicalData, setHistoricalData] = useState<any[]>([]);
   const [postsData, setPostsData] = useState<any[]>([]); // Posts per day/period
+
+  // Calculate total posts from postsData (sum all 'posts' property from API)
+  const totalPosts = useMemo(() => {
+    if (!Array.isArray(postsData)) return 0;
+    return postsData.reduce((sum, p) => sum + (p.posts ?? 0), 0);
+  }, [postsData]);
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -57,141 +64,17 @@ export default function DashboardTotalPage() {
 
       let json:any = null;
       if (mode === 'accrual') {
-        // Parity with /groups: gunakan API accrual per-campaign, lalu gabungkan
-        const campaignsRes = await fetch('/api/campaigns', { cache: 'no-store' });
-        const campaigns = await campaignsRes.json();
-        const groups:any[] = [];
-        const sumByDate = (arrs: any[][]) => {
-          const map = new Map<string, {date:string;views:number;likes:number;comments:number;shares:number;saves:number}>();
-          for (const a of arrs) {
-            for (const s of a||[]) {
-              const k = String(s.date);
-              const cur = map.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 };
-              cur.views += Number(s.views)||0; cur.likes += Number(s.likes)||0; cur.comments += Number(s.comments)||0; cur.shares += Number(s.shares)||0; cur.saves += Number(s.saves)||0;
-              map.set(k, cur);
-            }
-          }
-          return Array.from(map.values()).sort((a,b)=> a.date.localeCompare(b.date));
-        };
-        
-        // Build API URLs with custom date support
-        const buildAccrualUrl = (campaignId: string, overrideStart?: string, overrideDays?: number) => {
-          // In custom mode, cutoff param represents START DATE for the window
-          // Global cutoff is applied server-side only for masking, not for range
-          if (useCustomAccrualDates) {
-            const startStr = overrideStart || accrualCustomStart;
-            const start = new Date(startStr);
-            const end = new Date(accrualCustomEnd);
-            const days = overrideDays || (Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-            return `/api/campaigns/${encodeURIComponent(campaignId)}/accrual?days=${days}&snapshots_only=1&cutoff=${encodeURIComponent(startStr)}&custom=1`;
-          } else {
-            // Preset rolling window uses days + server will derive start from today
-            return `/api/campaigns/${encodeURIComponent(campaignId)}/accrual?days=${accrualWindow}&snapshots_only=1&cutoff=${encodeURIComponent(accrualCutoff)}`;
-          }
-        };
-        
-        // Helper to generate week ranges
-        const generateWeekRanges = (startStr: string, endStr: string) => {
-          const weeks: Array<{start: string, end: string, days: number}> = [];
-          const startDate = new Date(startStr + 'T00:00:00Z');
-          const endDate = new Date(endStr + 'T00:00:00Z');
-          
-          let weekStart = new Date(startDate);
-          while (weekStart <= endDate) {
-            const weekEnd = new Date(weekStart);
-            weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
-            
-            // Clamp to end date
-            const actualEnd = weekEnd > endDate ? endDate : weekEnd;
-            const days = Math.floor((actualEnd.getTime() - weekStart.getTime()) / (1000*60*60*24)) + 1;
-            
-            weeks.push({
-              start: weekStart.toISOString().slice(0, 10),
-              end: actualEnd.toISOString().slice(0, 10),
-              days
-            });
-            
-            // Move to next week
-            weekStart = new Date(weekStart);
-            weekStart.setUTCDate(weekStart.getUTCDate() + 7);
-          }
-          return weeks;
-        };
-        
-        // Historical cutoff: data sebelum/sama dengan tanggal ini dari historical, setelahnya dari real-time
-        const HISTORICAL_CUTOFF = '2026-01-02';
-        
-        console.log('[ACCRUAL] Building URLs for campaigns...');
-        
-        // Determine which date range needs real-time API
-        const rangeStart = accrualCustomStart;
-        const rangeEnd = accrualCustomEnd;
-        
-        // ALWAYS fetch realtime from FIXED start date (2026-01-03) for consistency
-        // This ensures the same baseline is used regardless of user-selected range
-        const REALTIME_FIXED_START = '2026-01-03';
-        const needsRealtime = rangeEnd > HISTORICAL_CUTOFF;
-        // Always start from fixed date to ensure consistent baseline calculations
-        const realtimeStart = REALTIME_FIXED_START;
-        
-        console.log('[ACCRUAL] Historical cutoff:', HISTORICAL_CUTOFF);
-        console.log('[ACCRUAL] Range:', rangeStart, 'to', rangeEnd);
-        console.log('[ACCRUAL] Needs realtime:', needsRealtime, 'from:', realtimeStart, '(fixed start)');
-        
-        if (needsRealtime && realtimeStart <= rangeEnd) {
-          // Fetch real-time data from FIXED start date to ensure consistent baseline
-          const rtStartDate = new Date(realtimeStart);
-          const rtEndDate = new Date(rangeEnd);
-          const rtDays = Math.ceil((rtEndDate.getTime() - rtStartDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-          
-          console.log('[ACCRUAL] Fetching real-time for', rtDays, 'days from', realtimeStart);
-          
-          const resps = await Promise.all((campaigns||[]).map((c:any)=> {
-            const url = buildAccrualUrl(c.id, realtimeStart, rtDays);
-            console.log('[ACCRUAL] Fetching:', url);
-            return fetch(url, { cache: 'no-store' });
-          }));        
-          const accs = await Promise.all(resps.map(r=> r.ok ? r.json() : Promise.resolve(null)));
-          const ttAll: any[][] = []; const igAll: any[][] = []; const totalAll: any[][] = [];
-          accs.forEach((acc:any, idx:number)=>{
-            if (!acc) return;
-            console.log('[ACCRUAL] Campaign', campaigns[idx]?.name, 'returned', acc?.series_total?.length || 0, 'days of data');
-            const gid = campaigns[idx]?.id;
-            const gname = campaigns[idx]?.name || gid;
-            groups.push({ id: gid, name: gname, series: acc?.series_total||[], series_tiktok: acc?.series_tiktok||[], series_instagram: acc?.series_instagram||[] });
-            ttAll.push(acc?.series_tiktok||[]); igAll.push(acc?.series_instagram||[]); totalAll.push(acc?.series_total||[]);
-          });
-          let total = sumByDate(totalAll);
-          let total_tiktok = sumByDate(ttAll);
-          let total_instagram = sumByDate(igAll);
-          
-          // IMPORTANT: Filter to only include data within user-selected range
-          // This ensures range Jan 10-16 shows same values regardless of historical range selection
-          const filterByRange = (arr: any[]) => arr.filter((d: any) => {
-            const dateStr = String(d.date).slice(0, 10);
-            return dateStr >= rangeStart && dateStr <= rangeEnd;
-          });
-          
-          // Apply range filter to totals
-          total = filterByRange(total);
-          total_tiktok = filterByRange(total_tiktok);
-          total_instagram = filterByRange(total_instagram);
-          
-          // Also filter group series
-          groups.forEach((g: any) => {
-            if (g.series) g.series = filterByRange(g.series);
-            if (g.series_tiktok) g.series_tiktok = filterByRange(g.series_tiktok);
-            if (g.series_instagram) g.series_instagram = filterByRange(g.series_instagram);
-          });
-          
-          console.log('[ACCRUAL] Real-time total entries (after range filter):', total.length);
-          console.log('[ACCRUAL] Real-time total views (after range filter):', total.reduce((s: number, d: any) => s + (Number(d.views) || 0), 0));
-          json = { interval:'daily', start: effStart, end: effEnd, groups, total, total_tiktok, total_instagram };
-        } else {
-          // All dates are in historical period, no real-time needed
-          console.log('[ACCRUAL] All dates in historical period, no real-time fetch needed');
-          json = { interval:'daily', start: effStart, end: effEnd, groups: [], total: [], total_tiktok: [], total_instagram: [] };
-        }
+        // Accrual now uses employee-based series endpoint (no campaigns)
+        const url = new URL('/api/groups/series', window.location.origin);
+        url.searchParams.set('start', effStart);
+        url.searchParams.set('end', effEnd);
+        url.searchParams.set('interval', 'daily');
+        url.searchParams.set('mode', 'accrual');
+        // Allow augmentation from posts_daily when snapshots are missing
+        url.searchParams.set('snapshots_only', '0');
+        url.searchParams.set('cutoff', accrualCutoff);
+        const res = await fetch(url.toString(), { cache: 'no-store' });
+        json = await res.json();
       } else {
         // Post date: gunakan endpoint groups/series bawaan
         const url = new URL('/api/groups/series', window.location.origin);
@@ -280,49 +163,8 @@ export default function DashboardTotalPage() {
   useEffect(()=>{ load(); }, [start, end, interval, mode, accrualWindow, useCustomAccrualDates, accrualCustomStart, accrualCustomEnd, activeCampaignId]);
   
   // Load historical data
-  useEffect(() => {
-    const loadHistorical = async () => {
-      if (!showHistorical) {
-        console.log('[HISTORICAL] showHistorical is false, skipping load');
-        setHistoricalData([]);
-        return;
-      }
-      
-      console.log('[HISTORICAL] Loading data... platformFilter:', platformFilter);
-      
-      try {
-        // Fetch employee historical metrics (no date filter to show all historical data)
-        const platformParam = platformFilter === 'all' ? '' : platformFilter;
-        
-        const url = `/api/admin/employee-historical?platform=${platformParam}`;
-        console.log('[HISTORICAL] Fetching from:', url);
-        
-        const res = await fetch(url);
-        const json = await res.json();
-        
-        console.log('[HISTORICAL] Response status:', res.status);
-        console.log('[HISTORICAL] Response data:', json);
-        
-        if (res.ok && json.data) {
-          console.log('[HISTORICAL] Data loaded successfully, count:', json.data.length);
-          console.log('[HISTORICAL] Sample entry:', json.data[0]);
-          // Sort by start_date to show chronologically
-          const sorted = json.data.sort((a: any, b: any) => 
-            new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
-          );
-          setHistoricalData(sorted);
-        } else {
-          console.error('[HISTORICAL] Failed to load:', json.error);
-          setHistoricalData([]);
-        }
-      } catch (error) {
-        console.error('[HISTORICAL] Exception:', error);
-        setHistoricalData([]);
-      }
-    };
-    
-    loadHistorical();
-  }, [showHistorical, platformFilter]);
+  // Historical disabled: ensure empty
+  useEffect(() => { setHistoricalData([]); }, [showHistorical, platformFilter]);
   
   // Load posts data for chart
   useEffect(() => {
@@ -342,20 +184,15 @@ export default function DashboardTotalPage() {
         url.searchParams.set('end', effEnd);
         url.searchParams.set('platform', platformFilter);
         
-        console.log('[POSTS] Fetching from:', url.toString());
-        
         const res = await fetch(url.toString(), { cache: 'no-store' });
         const json = await res.json();
         
         if (res.ok && json.series) {
-          console.log('[POSTS] Data loaded successfully, count:', json.series.length);
           setPostsData(json.series);
         } else {
-          console.error('[POSTS] Failed to load:', json.error);
           setPostsData([]);
         }
-      } catch (error) {
-        console.error('[POSTS] Exception:', error);
+      } catch {
         setPostsData([]);
       }
     };
@@ -399,7 +236,7 @@ export default function DashboardTotalPage() {
       console.log('[MERGE] historicalData.length:', historicalData.length);
       console.log('[MERGE] currentData keys:', Object.keys(currentData || {}));
       
-      if (!showHistorical || historicalData.length === 0) {
+      if (true || !showHistorical || historicalData.length === 0) {
         console.log('[MERGE] Skipping merge - no historical data to add');
         return currentData;
       }
@@ -552,7 +389,7 @@ export default function DashboardTotalPage() {
       const rangeEnd = new Date(accrualCustomEnd + 'T23:59:59Z');
       
       // Historical periods (trim to selected range; they will be added to real-time by aggregation below)
-      if (showHistorical && mergedData.historical) {
+      if (false && showHistorical && mergedData.historical) {
         console.log('[WEEKLY VIEW] Adding', mergedData.historical.length, 'historical periods');
         mergedData.historical.forEach((h: any) => {
           console.log('[WEEKLY VIEW] Historical entry raw:', JSON.stringify(h));
@@ -951,17 +788,15 @@ export default function DashboardTotalPage() {
           return sum;
         });
         
-        console.log('[WEEKLY VIEW] Posts values:', postsVals);
-        
         datasets.push({
           label: 'Posts',
           data: postsVals,
-          borderColor: '#a855f7', // Purple color for Posts
+          borderColor: '#a855f7',
           backgroundColor: 'rgba(168, 85, 247, 0.15)',
           fill: false,
           tension: 0.35,
-          yAxisID: 'y1', // Use secondary Y axis for Posts (different scale)
-          borderDash: [5, 5] // Dashed line to differentiate
+          yAxisID: 'y1',
+          borderDash: [5, 5]
         });
       }
       
@@ -1035,18 +870,16 @@ export default function DashboardTotalPage() {
         postsMap.set(p.date, p.posts || 0);
       });
       
-      const postsVals = totalSeries.map((t: any) => {
-        return postsMap.get(String(t.date)) || 0;
-      });
+      const postsVals = totalSeries.map((t: any) => postsMap.get(String(t.date)) || 0);
       
       datasets.push({
         label: 'Posts',
         data: postsVals,
-        borderColor: '#a855f7', // Purple
+        borderColor: '#a855f7',
         backgroundColor: 'rgba(168, 85, 247, 0.15)',
         fill: false,
         tension: 0.35,
-        yAxisID: 'y1', // Secondary Y axis
+        yAxisID: 'y1',
         borderDash: [5, 5]
       });
     }
@@ -1160,6 +993,7 @@ export default function DashboardTotalPage() {
               <span>Views: <strong className="text-white">{Number(grandTotals.views).toLocaleString('id-ID')}</strong></span>
               <span>Likes: <strong className="text-white">{Number(grandTotals.likes).toLocaleString('id-ID')}</strong></span>
               <span>Comments: <strong className="text-white">{Number(grandTotals.comments).toLocaleString('id-ID')}</strong></span>
+              <span>Posts: <strong className="text-white">{totalPosts.toLocaleString('id-ID')}</strong></span>
               {lastUpdatedHuman && (
                 <span className="ml-auto text-white/60">Terakhir diperbarui: <strong className="text-white/80">{lastUpdatedHuman}</strong></span>
               )}
@@ -1192,33 +1026,27 @@ export default function DashboardTotalPage() {
         </div>
       </div>
 
-      {/* Controls: move Mode to the left, Interval to the center, Metric to the right */}
-      <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 items-center gap-2 text-xs">
-        {/* Left: Mode (+ accrual window when applicable) */}
+
+      {/* Controls: Platform, Interval, Metric sejajar */}
+      <div className="mb-3 grid grid-cols-3 items-center gap-2 text-xs">
+        {/* Left: Platform Filter */}
         <div className="flex items-center gap-2 justify-start">
-          <span className="text-white/60">Mode:</span>
-          <button className={`px-2 py-1 rounded ${mode==='accrual'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setMode('accrual')}>Accrual</button>
-          <button className={`px-2 py-1 rounded ${mode==='postdate'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setMode('postdate')}>Post Date</button>
-          {mode==='accrual' && !useCustomAccrualDates && (
-            <div className="flex items-center gap-2 ml-2">
-              <span className="text-white/60">Rentang:</span>
-              <button className={`px-2 py-1 rounded ${accrualWindow===7?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setAccrualWindow(7)}>7 hari</button>
-              <button className={`px-2 py-1 rounded ${accrualWindow===28?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setAccrualWindow(28)}>28 hari</button>
-              <button className={`px-2 py-1 rounded ${accrualWindow===60?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setAccrualWindow(60)}>60 hari</button>
-            </div>
-          )}
+          <span className="text-white/60">Platform:</span>
+          <button className={`px-2 py-1 rounded ${platformFilter==='all'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('all')}>Semua</button>
+          <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='tiktok'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('tiktok')}>
+            <span className="text-[#38bdf8]">●</span> TikTok
+          </button>
+          <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='instagram'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('instagram')}>
+            <span className="text-[#f43f5e]">●</span> Instagram
+          </button>
         </div>
 
         {/* Center: Interval */}
         <div className="flex items-center gap-2 justify-center">
-          {mode!=='accrual' && (
-            <>
-              <span className="text-white/60">Interval:</span>
-              <button className={`px-2 py-1 rounded ${interval==='daily'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('daily')}>Harian</button>
-              <button className={`px-2 py-1 rounded ${interval==='weekly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('weekly')}>Mingguan</button>
-              <button className={`px-2 py-1 rounded ${interval==='monthly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('monthly')}>Bulanan</button>
-            </>
-          )}
+          <span className="text-white/60">Interval:</span>
+          <button className={`px-2 py-1 rounded ${interval==='daily'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('daily')}>Harian</button>
+          <button className={`px-2 py-1 rounded ${interval==='weekly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('weekly')}>Mingguan</button>
+          <button className={`px-2 py-1 rounded ${interval==='monthly'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setIntervalVal('monthly')}>Bulanan</button>
         </div>
 
         {/* Right: Metric */}
@@ -1228,28 +1056,6 @@ export default function DashboardTotalPage() {
           <button className={`px-2 py-1 rounded ${metric==='likes'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setMetric('likes')}>Likes</button>
           <button className={`px-2 py-1 rounded ${metric==='comments'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setMetric('comments')}>Comments</button>
         </div>
-      </div>
-      
-      {/* Platform Filter */}
-      <div className="mb-3 flex items-center gap-2 text-xs flex-wrap">
-        <span className="text-white/60">Platform:</span>
-        <button className={`px-2 py-1 rounded ${platformFilter==='all'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('all')}>Semua</button>
-        <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='tiktok'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('tiktok')}>
-          <span className="text-[#38bdf8]">●</span> TikTok
-        </button>
-        <button className={`px-2 py-1 rounded flex items-center gap-1 ${platformFilter==='instagram'?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} onClick={()=>setPlatformFilter('instagram')}>
-          <span className="text-[#f43f5e]">●</span> Instagram
-        </button>
-        
-        <span className="text-white/30 mx-2">|</span>
-        
-        {/* Posts toggle */}
-        <button 
-          className={`px-2 py-1 rounded flex items-center gap-1 ${showPosts?'bg-white/20 text-white':'text-white/70 hover:text-white hover:bg-white/10'}`} 
-          onClick={()=>setShowPosts(!showPosts)}
-        >
-          <span className="text-[#a855f7]">●</span> Posts
-        </button>
       </div>
 
       <div className="glass rounded-2xl p-4 md:p-6 border border-white/10 overflow-x-auto">
@@ -1302,9 +1108,7 @@ export default function DashboardTotalPage() {
                 position: 'right',
                 ticks:{ color:'#a855f7', font: { size: 10 } },
                 grid:{ drawOnChartArea: false },
-                title: {
-                  display: false
-                },
+                title: { display: false },
                 beginAtZero: true
               }
             },

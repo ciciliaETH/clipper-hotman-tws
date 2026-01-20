@@ -40,7 +40,8 @@ async function fetchTikTokData(
 ): Promise<FetchResult> {
   const start = Date.now();
   try {
-    const url = `${baseUrl}/api/fetch-metrics/${encodeURIComponent(username)}?start=${encodeURIComponent(startDate)}&end=${encodeURIComponent(endDate)}`;
+    // Aggregator-only mode to avoid RapidAPI usage during refresh-all
+    const url = `${baseUrl}/api/fetch-metrics/${encodeURIComponent(username)}?start=${encodeURIComponent(startDate)}&end=${encodeURIComponent(endDate)}&aggregator_only=1&all=1`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     
@@ -115,7 +116,8 @@ async function refreshHandler(req: Request) {
     const accountsPerBatch = 1; // Process 1 account per batch (FIT within 60s Vercel limit!)
     const autoContinue = body?.auto_continue === true; // default FALSE - manual batch to prevent timeout
     const offset = Math.max(0, Number(body?.offset || 0)); // Track which batch we're on
-    const fetchTimeout = 20000; // 20s timeout (max 2 attempts = 20s + 5s + 20s = 45s < 60s Vercel limit)
+    // Bump timeout to avoid race with ~30s responses from fetch-metrics
+    const fetchTimeout = 45000; // 45s timeout (still < 60s)
     
     // Get base URL for fetch-metrics endpoint
     const protocol = req.headers.get('x-forwarded-proto') || 'http';
@@ -144,8 +146,9 @@ async function refreshHandler(req: Request) {
         .eq('username', username)
         .maybeSingle();
       const count = Number(exist?.retry_count || 0);
-      const minutes = Math.min(360, Math.max(2, 2 * Math.pow(2, Math.min(count, 5))));
-      const nextAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+      // Fast backoff: very quick retries first
+      const backoffSeconds = [2, 5, 10, 20, 60, 120][Math.min(count, 5)];
+      const nextAt = new Date(Date.now() + backoffSeconds * 1000).toISOString();
       await supa.from('refresh_retry_queue').upsert({
         platform: 'tiktok',
         username,
@@ -220,7 +223,8 @@ async function refreshHandler(req: Request) {
   
   let totalSuccess = 0;
   let totalFailed = 0;
-  const maxRetries = 1; // Retry 1x only (fit within 60s Vercel timeout)
+  // We'll retry inline as long as there's time remaining (cap attempts to avoid runaway)
+  const maxRetries = 10;
   const failedAccountsQueue: string[] = []; // Track failed accounts to retry in next batch
   
   // CRITICAL: ALWAYS process ONLY 1 batch per request to avoid timeout
@@ -273,6 +277,7 @@ async function refreshHandler(req: Request) {
       // Retry logic for reliability - ZERO DATA LOSS
       let result: FetchResult | null = null;
       let attempt = 0;
+      const usernameStart = Date.now();
       
       while (attempt <= maxRetries) {
         result = await fetchTikTokData(username, campaignId, startDate, endDate, baseUrl, fetchTimeout);
@@ -281,11 +286,21 @@ async function refreshHandler(req: Request) {
         if (result.ok) {
           break;
         }
-        
+        // Stop retrying if user not found
+        if (result.status === 404) {
+          console.log(`[TikTok Refresh] ${username} not found (404). Skipping further retries.`);
+          break;
+        }
+        // Stop if this request is about to exceed function limit (keep a 8s buffer)
+        const elapsed = Date.now() - usernameStart;
+        if (elapsed > 52000) {
+          console.log(`[TikTok Refresh] Time budget exceeded for ${username} after ${attempt} attempts.`);
+          break;
+        }
         // If rate limited, wait shorter to fit in 60s timeout
         if (result.status === 429 && attempt < maxRetries) {
-          console.log(`[TikTok Refresh] Rate limited on ${username}, waiting 10s before retry ${attempt + 1}/${maxRetries}`);
-          await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds only (must fit in 60s total)
+          console.log(`[TikTok Refresh] Rate limited on ${username}, waiting 5s before retry ${attempt + 1}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
           attempt++;
           continue;
         }
@@ -293,7 +308,7 @@ async function refreshHandler(req: Request) {
         // If server error or timeout, retry with short delay
         if ((result.status >= 500 || result.status === 408) && attempt < maxRetries) {
           console.log(`[TikTok Refresh] Error ${result.status} on ${username}, retrying ${attempt + 1}/${maxRetries}`);
-          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds only (must fit in 60s total)
+          await new Promise(resolve => setTimeout(resolve, 3000));
           attempt++;
           continue;
         }
@@ -382,7 +397,7 @@ async function refreshHandler(req: Request) {
   const successResults = allResults.filter(r => r && r.ok);
   const failedResults = allResults.filter(r => r && !r.ok);
   
-  const totalPosts = successResults.reduce((sum, r) => sum + (r?.data?.tiktok?.posts_total || 0), 0);
+  const totalPostsInserted = successResults.reduce((sum, r) => sum + (r?.data?.tiktok?.posts_total || 0), 0);
   const totalViews = successResults.reduce((sum, r) => sum + (r?.data?.tiktok?.views || 0), 0);
   const totalLikes = successResults.reduce((sum, r) => sum + (r?.data?.tiktok?.likes || 0), 0);
   const avgDuration = allResults.length > 0 
@@ -399,9 +414,9 @@ async function refreshHandler(req: Request) {
     }
   }
 
-  // If processing only retry items, don't advance offset
-  const processedCount = offset + (allResults.length > 0 && allResults.every(r => failedAccountsQueue.includes(r.username)) ? 0 : allResults.length);
-  const remainingCount = allUsernames.length - processedCount;
+  // Do not advance offset on pure-fail batches; only advance by successes
+  const processedCount = offset + totalSuccess;
+  const remainingCount = Math.max(0, allUsernames.length - processedCount);
   const nextOffset = remainingCount > 0 ? processedCount : 0;
   
   // CRITICAL ERROR LOGGING: Alert if any accounts failed after all retries
@@ -413,8 +428,18 @@ async function refreshHandler(req: Request) {
     console.log(`[TikTok Refresh] ✅ SUCCESS: All ${totalSuccess} accounts refreshed successfully`);
   }
 
+  // Build success_details similar to IG
+  const successDetails = successResults.map(r => ({
+    username: r.username,
+    posts: r?.data?.tiktok?.posts_total || 0,
+    views: r?.data?.tiktok?.views || 0,
+    likes: r?.data?.tiktok?.likes || 0,
+    source: r?.data?.telemetry?.mode || 'aggregator'
+  }));
+
   return NextResponse.json({
     total_usernames: allUsernames.length,
+    usernames_with_ids: allUsernames.length, // TikTok aggregator flow doesn't require secUid
     total_batches: totalBatches,
     current_batch: startBatch + 1,
     batches_processed: batchProgress.length,
@@ -423,29 +448,32 @@ async function refreshHandler(req: Request) {
     success: totalSuccess,
     failed: totalFailed,
     remaining: remainingCount,
-    retry_queue: failedAccountsQueue.length,
-    retry_queue_usernames: failedAccountsQueue,
-    retry_queue_pending: (await getDueRetry(1000)).length,
     offset: offset,
     next_offset: nextOffset,
-    total_posts: totalPosts,
+    total_posts_inserted: totalPostsInserted,
     total_views: totalViews,
     total_likes: totalLikes,
     avg_duration_ms: avgDuration,
     auto_continue: autoContinue,
-    message: failedAccountsQueue.length > 0
-      ? `Batch ${startBatch + 1}/${totalBatches}: ${totalSuccess} success, ${failedAccountsQueue.length} will RETRY in next batch. Click refresh to continue.`
+    message: (totalFailed > 0 && totalSuccess === 0)
+      ? `Batch ${startBatch + 1}/${totalBatches}: ${batchProgress[0]?.accounts?.[0] || ''} TIMEOUT. Will retry the SAME account. Click refresh (or wait Auto) to retry.`
       : remainingCount > 0
       ? `Batch ${startBatch + 1}/${totalBatches}: Processed ${allResults.length} accounts (${processedCount}/${allUsernames.length} total). Click refresh to continue with next ${Math.min(accountsPerBatch, remainingCount)} accounts.`
       : `All ${allUsernames.length} accounts processed successfully!`,
     batch_progress: batchProgress,
+    batch_size: 1,
     accounts_per_batch: accountsPerBatch,
+    delay_ms: delayMs,
     results: body?.include_details ? allResults : undefined,
+    retry_queue: failedAccountsQueue.length,
+    retry_queue_usernames: failedAccountsQueue,
+    retry_queue_pending: (await getDueRetry(1000)).length,
     failed_usernames: failedResults.length > 0 ? failedResults.map(r => ({
       username: r.username,
       error: r.error,
       status: r.status
-    })) : undefined
+    })) : undefined,
+    success_details: body?.include_details ? successDetails : undefined
   });
   } catch (error: any) {
     console.error('[refreshHandler] Unexpected error:', error);

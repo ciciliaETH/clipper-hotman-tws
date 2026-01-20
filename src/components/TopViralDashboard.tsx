@@ -86,7 +86,6 @@ export default function TopViralDashboard({ campaignId, days = 30, limit = 5 }: 
         <div className="flex items-center gap-3 mb-6">
           <TrendingUp className="w-6 h-6 text-pink-500" />
           <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
-          <span className="text-sm text-white/60">(bulan ini)</span>
         </div>
         
         <div className="space-y-4">
@@ -138,9 +137,6 @@ export default function TopViralDashboard({ campaignId, days = 30, limit = 5 }: 
         <TrendingUp className="w-6 h-6 text-pink-500" />
         <div className="flex items-center gap-3">
           <h2 className="text-xl font-bold text-white">Top {limit} Video FYP</h2>
-          <span className="text-sm text-white/60">
-            {rangeMode === 'calendar' ? '(bulan ini)' : `(${selectedDays} hari terakhir)`}
-          </span>
         </div>
         {/* Range controls */}
         <div className="flex items-center gap-2">

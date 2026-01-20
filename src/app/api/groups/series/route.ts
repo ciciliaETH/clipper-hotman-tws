@@ -207,6 +207,15 @@ export async function GET(req: Request) {
                 const ds=Math.max(0, Number((cur as any).shares||0)-Number((prev as any).shares||0));
                 const dsv=Math.max(0, Number((cur as any).saves||0)-Number((prev as any).saves||0));
                 add(d, { views: dv, likes: dl, comments: dc, shares: ds, saves: dsv });
+              } else if (cur && !prev) {
+                // Initial spike on first snapshot inside window
+                add(d, { 
+                  views: Math.max(0, Number((cur as any).views||0)),
+                  likes: Math.max(0, Number((cur as any).likes||0)),
+                  comments: Math.max(0, Number((cur as any).comments||0)),
+                  shares: Math.max(0, Number((cur as any).shares||0)),
+                  saves: Math.max(0, Number((cur as any).saves||0))
+                });
               }
               if (cur) prev = cur;
             }
@@ -256,6 +265,16 @@ export async function GET(req: Request) {
                 if (d >= start && d <= end) {
                   const curAgg = map.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
                   curAgg.views+=dv; curAgg.likes+=dl; curAgg.comments+=dc; curAgg.shares+=ds; curAgg.saves+=dsv; map.set(d, curAgg);
+                }
+              } else if (cur && !prev) {
+                if (d >= start && d <= end) {
+                  const curAgg = map.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+                  curAgg.views+=Math.max(0, Number((cur as any).views||0));
+                  curAgg.likes+=Math.max(0, Number((cur as any).likes||0));
+                  curAgg.comments+=Math.max(0, Number((cur as any).comments||0));
+                  curAgg.shares+=Math.max(0, Number((cur as any).shares||0));
+                  curAgg.saves+=Math.max(0, Number((cur as any).saves||0));
+                  map.set(d, curAgg);
                 }
               }
               if (cur) prev = cur;
@@ -362,17 +381,25 @@ export async function GET(req: Request) {
           const requiredHashtags: string[] = Array.isArray((camp as any)?.required_hashtags) ? (camp as any).required_hashtags : [];
 
           if (respectHashtags && requiredHashtags.length && ttHandles.length && !snapshotsOnly) {
-            const { data: ttRows } = await supa
+            const { data: ttTaken } = await supa
               .from('tiktok_posts_daily')
-              .select('username, post_date, play_count, digg_count, comment_count, share_count, save_count, title')
+              .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count, title')
               .in('username', ttHandles)
+              .gte('taken_at', start+'T00:00:00Z')
+              .lte('taken_at', end+'T23:59:59Z');
+            const { data: ttLegacy } = await supa
+              .from('tiktok_posts_daily')
+              .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count, title')
+              .in('username', ttHandles)
+              .is('taken_at', null)
               .gte('post_date', start)
               .lte('post_date', end);
+            const ttRows = ([] as any[]).concat(ttTaken||[], ttLegacy||[]);
             const tmp = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
             for (const r of ttRows||[]) {
               const title = String((r as any).title||'');
               if (!hasRequiredHashtag(title, requiredHashtags)) continue;
-              const d = String((r as any).post_date);
+              const d = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
               const cur = tmp.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
               cur.views += Number((r as any).play_count)||0;
               cur.likes += Number((r as any).digg_count)||0;
@@ -386,15 +413,23 @@ export async function GET(req: Request) {
               ttHistMap.set(k, { date:k, ...pv });
             }
           } else if (!snapshotsOnly && ttHandles.length) {
-            const { data: ttRows } = await supa
+            const { data: ttTaken } = await supa
               .from('tiktok_posts_daily')
-              .select('username, post_date, play_count, digg_count, comment_count, share_count, save_count')
+              .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count')
               .in('username', ttHandles)
+              .gte('taken_at', start+'T00:00:00Z')
+              .lte('taken_at', end+'T23:59:59Z');
+            const { data: ttLegacy } = await supa
+              .from('tiktok_posts_daily')
+              .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count')
+              .in('username', ttHandles)
+              .is('taken_at', null)
               .gte('post_date', start)
               .lte('post_date', end);
+            const ttRows = ([] as any[]).concat(ttTaken||[], ttLegacy||[]);
             const tmp = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
             for (const r of ttRows||[]) {
-              const d = String((r as any).post_date);
+              const d = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
               const cur = tmp.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
               cur.views += Number((r as any).play_count)||0;
               cur.likes += Number((r as any).digg_count)||0;
@@ -416,15 +451,16 @@ export async function GET(req: Request) {
           if (respectHashtags && requiredHashtags.length && igHandles.length && !snapshotsOnly) {
             const { data: igRows } = await supa
               .from('instagram_posts_daily')
-              .select('username, post_date, play_count, like_count, comment_count, caption')
+              .select('username, taken_at, post_date, play_count, like_count, comment_count, caption')
               .in('username', igHandles)
-              .gte('post_date', start)
-              .lte('post_date', end);
+              .gte('taken_at', start+'T00:00:00Z')
+              .lte('taken_at', end+'T23:59:59Z');
             const tmp = new Map<string,{views:number;likes:number;comments:number}>();
             for (const r of igRows||[]) {
               const caption = String((r as any).caption||'');
               if (!hasRequiredHashtag(caption, requiredHashtags)) continue;
-              const d = String((r as any).post_date);
+              const taken = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
+              const d = taken;
               const cur = tmp.get(d) || { views:0, likes:0, comments:0 };
               cur.views += Number((r as any).play_count)||0;
               cur.likes += Number((r as any).like_count)||0;
@@ -438,13 +474,14 @@ export async function GET(req: Request) {
           } else if (!snapshotsOnly && igHandles.length) {
             const { data: igRows } = await supa
               .from('instagram_posts_daily')
-              .select('username, post_date, play_count, like_count, comment_count')
+              .select('username, taken_at, post_date, play_count, like_count, comment_count')
               .in('username', igHandles)
-              .gte('post_date', start)
-              .lte('post_date', end);
+              .gte('taken_at', start+'T00:00:00Z')
+              .lte('taken_at', end+'T23:59:59Z');
             const tmp = new Map<string,{views:number;likes:number;comments:number}>();
             for (const r of igRows||[]) {
-              const d = String((r as any).post_date);
+              const taken = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
+              const d = taken;
               const cur = tmp.get(d) || { views:0, likes:0, comments:0 };
               cur.views += Number((r as any).play_count)||0;
               cur.likes += Number((r as any).like_count)||0;
@@ -499,6 +536,78 @@ export async function GET(req: Request) {
         }
       }
 
+      // If there are no campaigns or nothing accumulated, fallback to all employees snapshots
+      if (!campaigns || !campaigns.length || totalMap.size === 0) {
+        const totalArr = await calcSeries(allEmpIds);
+        const totalTTArr = await calcSeriesPlatform(allEmpIds, 'tiktok');
+        const totalIGArr = await calcSeriesPlatform(allEmpIds, 'instagram');
+
+        // Apply accrual cutoff
+        const u = new URL(req.url);
+        const cutoff = String(u.searchParams.get('cutoff') || process.env.ACCRUAL_CUTOFF_DATE || '2026-01-02');
+        const trim = u.searchParams.get('trim') === '1';
+        const zeroBefore = (arr:any[] = []) => arr.map((s:any)=> (String(s.date) <= cutoff ? { ...s, views:0, likes:0, comments:0, shares:0, saves:0 } : s));
+        let total = zeroBefore(totalArr);
+        let total_tiktok = zeroBefore(totalTTArr);
+        let total_instagram = zeroBefore(totalIGArr);
+        if (trim) {
+          const keep = (s:any)=> String(s.date) >= cutoff;
+          total = total.filter(keep);
+          total_tiktok = total_tiktok.filter(keep);
+          total_instagram = total_instagram.filter(keep);
+        }
+
+        let totals = total.reduce((acc:any, s:any)=>({ views:acc.views+s.views, likes:acc.likes+s.likes, comments:acc.comments+s.comments, shares:acc.shares+s.shares, saves:acc.saves+s.saves }), { views:0, likes:0, comments:0, shares:0, saves:0 });
+
+        // Extra fallback: if snapshots also kosong total, turunkan dari social_metrics.last_updated
+        if ((totals.views + totals.likes + totals.comments + totals.shares + totals.saves) === 0) {
+          const startTs = start+'T00:00:00Z';
+          const endTs = end+'T23:59:59Z';
+          const { data: rows } = await supa
+            .from('social_metrics')
+            .select('user_id, platform, views, likes, comments, shares, saves, last_updated')
+            .in('user_id', allEmpIds)
+            .gte('last_updated', startTs)
+            .lte('last_updated', endTs);
+
+          const byDateTotal = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
+          const byDateTT = new Map<string,{views:number;likes:number;comments:number;shares:number;saves:number}>();
+          const byDateIG = new Map<string,{views:number;likes:number;comments:number}>();
+          for (const r of rows||[]) {
+            const d = new Date(String((r as any).last_updated)).toISOString().slice(0,10);
+            const plat = String((r as any).platform||'').toLowerCase();
+            const v = { views:Number((r as any).views)||0, likes:Number((r as any).likes)||0, comments:Number((r as any).comments)||0, shares:Number((r as any).shares)||0, saves:Number((r as any).saves)||0 };
+            const tcur = byDateTotal.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+            tcur.views+=v.views; tcur.likes+=v.likes; tcur.comments+=v.comments; tcur.shares+=v.shares; tcur.saves+=v.saves;
+            byDateTotal.set(d, tcur);
+            if (plat==='tiktok') {
+              const c = byDateTT.get(d) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+              c.views+=v.views; c.likes+=v.likes; c.comments+=v.comments; c.shares+=v.shares; c.saves+=v.saves;
+              byDateTT.set(d, c);
+            } else if (plat==='instagram') {
+              const c = byDateIG.get(d) || { views:0, likes:0, comments:0 };
+              c.views+=v.views; c.likes+=v.likes; c.comments+=v.comments;
+              byDateIG.set(d, c);
+            }
+          }
+          total = keys.map(k=> ({ date:k, ...(byDateTotal.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 }) }));
+          total_tiktok = keys.map(k=> ({ date:k, ...(byDateTT.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 }) }));
+          total_instagram = keys.map(k=> ({ date:k, ...(byDateIG.get(k) || { views:0, likes:0, comments:0 }) as any } as any));
+
+          // Apply cutoff again
+          total = zeroBefore(total);
+          total_tiktok = zeroBefore(total_tiktok);
+          total_instagram = zeroBefore(total_instagram);
+          if (trim) {
+            const keep = (s:any)=> String(s.date) >= cutoff;
+            total = total.filter(keep); total_tiktok = total_tiktok.filter(keep); total_instagram = total_instagram.filter(keep);
+          }
+          totals = total.reduce((acc:any, s:any)=>({ views:acc.views+s.views, likes:acc.likes+s.likes, comments:acc.comments+s.comments, shares:acc.shares+s.shares, saves:acc.saves+s.saves }), { views:0, likes:0, comments:0, shares:0, saves:0 });
+        }
+
+        return NextResponse.json({ interval: 'daily', start, end, groups: [], total, total_tiktok, total_instagram, totals, mode:'accrual' });
+      }
+
       // Build total arrays from maps (already include fallbacks)
       let total = keys.map(k=> ({ date:k, ...(totalMap.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 }) }));
       let total_tiktok = keys.map(k=> ({ date:k, ...(totalTTMap.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 }) }));
@@ -536,25 +645,11 @@ export async function GET(req: Request) {
 
       const totals = total.reduce((acc:any, s:any)=>({ views:acc.views+s.views, likes:acc.likes+s.likes, comments:acc.comments+s.comments, shares:acc.shares+s.shares, saves:acc.saves+s.saves }), { views:0, likes:0, comments:0, shares:0, saves:0 });
 
-      return NextResponse.json({ interval: 'daily', start, end, groups: maskedGroups, total, total_tiktok, total_instagram, totals, mode:'accrual' });
+      // Disable groups in response; keep totals intact
+      return NextResponse.json({ interval: 'daily', start, end, groups: [], total, total_tiktok, total_instagram, totals, mode:'accrual' });
     }
 
-    // get all campaigns (groups) for post date series
-    const { data: campaigns, error: cErr } = await supa
-      .from('campaigns')
-      .select('id, name')
-      .order('start_date', { ascending: true });
-    if (cErr) throw cErr;
-
-    const groups: Array<{ id: string; name: string; series: Array<{date:string; views:number; likes:number; comments:number; shares:number; saves:number}>, series_tiktok?: Array<{date:string; views:number; likes:number; comments:number; shares:number; saves:number}>, series_instagram?: Array<{date:string; views:number; likes:number; comments:number}> }>=[];
-
-    // accumulate total by date across groups
-    const totalMap = new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
-    // also keep platform-separated totals for legend sync
-    const totalTTMap = new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
-    const totalIGMap = new Map<string, { views:number; likes:number; comments:number }>();
-
-    // helpers for zero-fill keys
+    // helpers for zero-fill keys (used by post-date branch)
     const buildKeys = (mode: 'daily'|'weekly'|'monthly', s: string, e: string): string[] => {
       const keys: string[] = [];
       const ds = new Date(s+'T00:00:00Z');
@@ -575,20 +670,27 @@ export async function GET(req: Request) {
     };
     const keys = buildKeys(interval, startISO!, endISO!);
 
-    // (moved to deriveIGUsernamesForCampaign above)
-
+    // Helpers to aggregate series from posts tables (defined before usage)
     const aggInstagramSeries = async (handles: string[], startISO: string, endISO: string, interval: 'daily'|'weekly'|'monthly') => {
       if (!handles.length) return new Map<string, { views:number; likes:number; comments:number }>();
       const map = new Map<string, { views:number; likes:number; comments:number }>();
-      const base = supa.from('instagram_posts_daily')
-        .select('username, post_date, play_count, like_count, comment_count')
+      const { data: rowsTaken } = await supa
+        .from('instagram_posts_daily')
+        .select('username, taken_at, post_date, play_count, like_count, comment_count')
         .in('username', handles)
+        .gte('taken_at', startISO+'T00:00:00Z')
+        .lte('taken_at', endISO+'T23:59:59Z');
+      const { data: rowsLegacy } = await supa
+        .from('instagram_posts_daily')
+        .select('username, taken_at, post_date, play_count, like_count, comment_count')
+        .in('username', handles)
+        .is('taken_at', null)
         .gte('post_date', startISO)
         .lte('post_date', endISO);
-      const { data: rows } = await base;
+      const rows = ([] as any[]).concat(rowsTaken||[], rowsLegacy||[]);
       for (const r of rows||[]) {
         let key: string;
-        const dStr = String((r as any).post_date);
+        const dStr = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
         if (interval === 'monthly') {
           const d = new Date(dStr+'T00:00:00Z');
           key = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0,10);
@@ -609,32 +711,162 @@ export async function GET(req: Request) {
       return map;
     };
 
-    for (const camp of campaigns || []) {
-      // TikTok series via RPC
-      const { data: seriesRows } = await supa
-        .rpc('campaign_series_v2', {
-          campaign: camp.id,
-          start_date: startISO,
-          end_date: endISO,
-          p_interval: interval,
-        } as any);
-      const ttRaw = (seriesRows || []).map((r:any)=>({
-        date: String(r.bucket_date),
-        views: Number(r.views)||0,
-        likes: Number(r.likes)||0,
-        comments: Number(r.comments)||0,
-        shares: Number(r.shares)||0,
-        saves: Number(r.saves)||0,
-      }));
-      const ttMap = new Map(ttRaw.map(s=>[s.date, s] as const));
+    const aggTikTokSeries = async (handles: string[], startISO: string, endISO: string, interval: 'daily'|'weekly'|'monthly') => {
+      if (!handles.length) return new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
+      const map = new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
+      // rows with taken_at in range
+      const { data: rowsTaken } = await supa
+        .from('tiktok_posts_daily')
+        .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count')
+        .in('username', handles)
+        .gte('taken_at', startISO+'T00:00:00Z')
+        .lte('taken_at', endISO+'T23:59:59Z');
+      // legacy rows where taken_at is null but post_date in range
+      const { data: rowsLegacy } = await supa
+        .from('tiktok_posts_daily')
+        .select('username, taken_at, post_date, play_count, digg_count, comment_count, share_count, save_count')
+        .in('username', handles)
+        .is('taken_at', null)
+        .gte('post_date', startISO)
+        .lte('post_date', endISO);
+      const rows = ([] as any[]).concat(rowsTaken||[], rowsLegacy||[]);
+      for (const r of rows||[]) {
+        let key: string;
+        const dStr = (r as any).taken_at ? new Date(String((r as any).taken_at)).toISOString().slice(0,10) : String((r as any).post_date);
+        if (interval === 'monthly') {
+          const d = new Date(dStr+'T00:00:00Z');
+          key = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0,10);
+        } else if (interval === 'weekly') {
+          const d = new Date(dStr+'T00:00:00Z');
+          const day = d.getUTCDay();
+          const monday = new Date(d); monday.setUTCDate(d.getUTCDate() - ((day+6)%7));
+          key = monday.toISOString().slice(0,10);
+        } else {
+          key = dStr;
+        }
+        const cur = map.get(key) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+        cur.views += Number((r as any).play_count)||0;
+        cur.likes += Number((r as any).digg_count)||0;
+        cur.comments += Number((r as any).comment_count)||0;
+        cur.shares += Number((r as any).share_count)||0;
+        cur.saves += Number((r as any).save_count)||0;
+        map.set(key, cur);
+      }
+      return map;
+    };
 
-      // Instagram series aggregated from instagram_posts_daily for this campaign
+    // ALL EMPLOYEES (no campaigns): aggregate globally by posts tables
+    {
+      // collect all employee ids
+      const { data: emps } = await supa
+        .from('users')
+        .select('id, tiktok_username, instagram_username')
+        .eq('role','karyawan');
+      const empIds = (emps||[]).map((u:any)=> String(u.id));
+
+      // TikTok handles
+      const ttSet = new Set<string>();
+      for (const u of emps||[]) {
+        const h = String((u as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase();
+        if (h) ttSet.add(h);
+      }
+      try {
+        if (empIds.length) {
+          const { data: m } = await supa
+            .from('user_tiktok_usernames')
+            .select('tiktok_username, user_id')
+            .in('user_id', empIds);
+          for (const r of m||[]) {
+            const h = String((r as any).tiktok_username||'').trim().replace(/^@+/, '').toLowerCase();
+            if (h) ttSet.add(h);
+          }
+        }
+      } catch {}
+
+      // Instagram handles
+      const igSet = new Set<string>();
+      for (const u of emps||[]) {
+        const h = String((u as any).instagram_username||'').trim().replace(/^@+/, '').toLowerCase();
+        if (h) igSet.add(h);
+      }
+      try {
+        if (empIds.length) {
+          const { data: m } = await supa
+            .from('user_instagram_usernames')
+            .select('instagram_username, user_id')
+            .in('user_id', empIds);
+          for (const r of m||[]) {
+            const h = String((r as any).instagram_username||'').trim().replace(/^@+/, '').toLowerCase();
+            if (h) igSet.add(h);
+          }
+        }
+      } catch {}
+
+      const ttMap = await aggTikTokSeries(Array.from(ttSet), startISO!, endISO!, interval);
+      const igMap = await aggInstagramSeries(Array.from(igSet), startISO!, endISO!, interval);
+
+      // Build totals with zero-fill
+      const totalFilled = keys.map(k => {
+        const tt = ttMap.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+        const ig = igMap.get(k) || { views:0, likes:0, comments:0 };
+        return { date:k, views:(tt.views||0)+(ig.views||0), likes:(tt.likes||0)+(ig.likes||0), comments:(tt.comments||0)+(ig.comments||0), shares:tt.shares||0, saves:tt.saves||0 };
+      });
+      const totalTT = keys.map(k => {
+        const v = ttMap.get(k) || { views:0, likes:0, comments:0, shares:0, saves:0 };
+        return { date:k, ...v };
+      });
+      const totalIG = keys.map(k => {
+        const v = igMap.get(k) || { views:0, likes:0, comments:0 };
+        return { date:k, views:v.views, likes:v.likes, comments:v.comments, shares:0, saves:0 };
+      });
+
+      const totals = totalFilled.reduce((acc:any, s:any)=>(
+        { views:acc.views+(s.views||0), likes:acc.likes+(s.likes||0), comments:acc.comments+(s.comments||0), shares:acc.shares+(s.shares||0), saves:acc.saves+(s.saves||0) }
+      ), { views:0, likes:0, comments:0, shares:0, saves:0 });
+
+      return NextResponse.json({ interval, start: startISO, end: endISO, groups: [], total: totalFilled, total_tiktok: totalTT, total_instagram: totalIG, totals });
+    }
+
+    // (old campaigns path is no longer used, kept for backward-compat if needed)
+    const { data: campaigns, error: cErr } = await supa
+      .from('campaigns')
+      .select('id, name')
+      .order('start_date', { ascending: true });
+    if (cErr) throw cErr;
+
+    const groups: Array<{ id: string; name: string; series: Array<{date:string; views:number; likes:number; comments:number; shares:number; saves:number}>, series_tiktok?: Array<{date:string; views:number; likes:number; comments:number; shares:number; saves:number}>, series_instagram?: Array<{date:string; views:number; likes:number; comments:number}> }>=[];
+
+    // accumulate total by date across groups
+    const totalMap = new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
+    // also keep platform-separated totals for legend sync
+    const totalTTMap = new Map<string, { views:number; likes:number; comments:number; shares:number; saves:number }>();
+    const totalIGMap = new Map<string, { views:number; likes:number; comments:number }>();
+
+    // keys already built above
+
+    // (moved to deriveIGUsernamesForCampaign above)
+
+    // moved above – helpers defined earlier
+
+    for (const camp of campaigns || []) {
+      // Derive handles for campaign
+      const { data: empInCamp } = await supa
+        .from('employee_groups')
+        .select('employee_id')
+        .eq('campaign_id', camp.id);
+      const empIds = Array.from(new Set((empInCamp||[]).map((r:any)=> String(r.employee_id))));
+      const ttHandles = await deriveTTUsernames(camp.id, empIds);
       const igHandles = await deriveIGUsernamesForCampaign(supa, camp.id);
+      // Aggregate by posts tables
+      const ttMapRaw = await aggTikTokSeries(ttHandles, startISO!, endISO!, interval);
       const igMap = await aggInstagramSeries(igHandles, startISO!, endISO!, interval);
+      // normalize map to object for consistent access
+      const ttMap = new Map<string, {date:string; views:number; likes:number; comments:number; shares:number; saves:number}>();
+      for (const [k,v] of ttMapRaw.entries()) ttMap.set(k, { date:k, ...v });
 
       // zero-fill per date key and merge TT + IG
       const series = keys.map(k => {
-        const tt = ttMap.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 };
+        const tt = ttMap.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 } as any;
         const ig = igMap.get(k) || { views:0, likes:0, comments:0 };
         return {
           date: k,
@@ -647,7 +879,7 @@ export async function GET(req: Request) {
       });
       // Platform-separated series for this campaign (for consistent UI legends)
       const series_tiktok = keys.map(k => {
-        const tt = ttMap.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 };
+        const tt = ttMap.get(k) || { date:k, views:0, likes:0, comments:0, shares:0, saves:0 } as any;
         return { date: k, views: tt.views, likes: tt.likes, comments: tt.comments, shares: tt.shares, saves: tt.saves };
       });
       const series_instagram = keys.map(k => {
@@ -697,7 +929,8 @@ export async function GET(req: Request) {
       saves: acc.saves + (s.saves||0),
     }), { views:0, likes:0, comments:0, shares:0, saves:0 });
 
-    return NextResponse.json({ interval, start: startISO, end: endISO, groups, total: totalFilled, total_tiktok: totalTT, total_instagram: totalIG, totals });
+    // Disable groups in response; keep totals intact
+    return NextResponse.json({ interval, start: startISO, end: endISO, groups: [], total: totalFilled, total_tiktok: totalTT, total_instagram: totalIG, totals });
   } catch (e:any) {
     // Tambahkan stack trace ke response agar error detail bisa dilihat
     return NextResponse.json({ error: e.message, stack: e.stack }, { status: 500 });

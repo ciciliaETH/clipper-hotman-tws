@@ -8,7 +8,7 @@ CREATE OR REPLACE FUNCTION public.campaign_series(
   campaign UUID,
   start_date DATE,
   end_date DATE,
-  interval TEXT DEFAULT 'daily'
+  p_interval TEXT DEFAULT 'daily'
 )
 RETURNS TABLE(
   bucket_date DATE,
@@ -38,8 +38,8 @@ WITH usernames AS (
 )
 SELECT
   CASE
-    WHEN interval = 'weekly' THEN date_trunc('week', d)::date
-    WHEN interval = 'monthly' THEN date_trunc('month', d)::date
+    WHEN p_interval = 'weekly' THEN date_trunc('week', d)::date
+    WHEN p_interval = 'monthly' THEN date_trunc('month', d)::date
     ELSE d
   END AS bucket_date,
   SUM(views) AS views,
