@@ -550,27 +550,7 @@ Ini akan menulis snapshot harian ke social_metrics_history.`)) return;
             <span className="text-lg">📅</span>
             <span className="font-medium">{runningTakenAt ? 'Processing...' : 'Backfill Taken At'}</span>
           </button>
-          {/* Backfill accrual snapshots */}
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              min={7}
-              max={180}
-              value={accrualDays}
-              onChange={(e)=> setAccrualDays(Math.max(7, Math.min(180, Number(e.target.value||60))))}
-              className="w-20 rounded-lg px-3 py-2 bg-gray-800 text-white border border-white/20 text-sm"
-              title="Jumlah hari backfill accrual"
-            />
-            <button
-              onClick={runAccrualBackfill}
-              disabled={runningAccrual || refreshingTikTok || refreshingIG}
-              className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 text-white shadow-lg hover:shadow-xl transition-all border border-white/10 disabled:opacity-50"
-              title="Backfill snapshot accrual ke social_metrics_history"
-            >
-              <span className="text-lg">🧮</span>
-              <span className="font-medium">{runningAccrual ? 'Backfilling…' : 'Backfill Accrual'}</span>
-            </button>
-          </div>
+          {/* Backfill accrual snapshots removed (no longer used) */}
           {/* TikTok refresh controls */}
           <div className="flex items-center gap-2">
             <button 
